@@ -1,0 +1,20 @@
+root = "."
+testdata_dir = "testdata"
+tmp_dir = "tmp"
+
+[build]
+  # main.go の場所を cmd/main.go に指定する
+  cmd = "go build -o ./tmp/main ./cmd/main.go"
+  entrypoint = "./tmp/main"
+  # 監視する拡張子
+  include_ext = ["go", "tpl", "tmpl", "html", "yaml", "yml"]
+  # 除外するディレクトリをもう少し広げ、先頭にスラッシュを入れて確実に指定します
+  exclude_dir = ["assets", "tmp", "vendor", "testdata", "docs", "node_modules", ".git"]
+  
+  # ファイル名で直接除外（これが効くことが多いです！）
+  exclude_file = ["docs/docs.go"] # ビルド時に書き換えられる可能性があるため
+  # 変更から再ビルドまでの待機時間（ラズパイなら少し長めの 500ms くらいが安定します）
+  delay = 500
+
+[log]
+  time = true

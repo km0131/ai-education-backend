@@ -1,0 +1,85 @@
+version: '3.8'
+
+services:
+  # --- PostgreSQL ---
+  db:
+    image: postgres:17-alpine
+    networks:
+      ai-net:
+        aliases:
+          - db
+    env_file: .env
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "${DB_PORT}:5432"
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  # --- Go バックエンド API ---
+  backend:
+    build:
+      context: .  # ディレクトリ構造に合わせて調整してください（リポジトリ直下なら .）
+      dockerfile: Dockerfile
+    networks:
+      - ai-net
+    env_file: .env
+    ports:
+      - "8080:8080"
+    environment:
+      - GIN_MODE=release
+      - DB_HOST=db
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - DB_PORT=${DB_PORT}
+    volumes:
+      # ${PWD}/images が存在することを確認してください
+      - ./images:/app/images:Z
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8080"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+
+  # --- SurrealDB ---
+  surrealdb:
+    image: surrealdb/surrealdb:latest
+    networks:
+      - ai-net
+    command: start --log trace --user ${SURREALDB_USER:-root} --pass ${SURREALDB_PASS:-root} rocksdb:/data/database.db
+    ports:
+      - "8005:8000"
+    volumes:
+      - ./surreal_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- バックエンド評価 (必要に応じて残す) ---
+  backend-lint:
+    image: alpine:latest
+    volumes:
+      - .:/app:Z
+    working_dir: /app
+    # コンテナ起動時に go を入れて、そのまま fmt と vet を実行する
+    command: ["sh", "-c", "apk add --no-cache go && go fmt ./... && go vet ./..."]
+
+networks:
+  ai-net:
+    name: ai-net  # 外部から明示的な名前で参照できるように固定
+    driver: bridge

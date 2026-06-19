@@ -1,0 +1,10 @@
+# 画像フォルダ
+images/
+
+# DB
+postgres_data/
+surreal_data/
+
+# envファイル
+.env
+.idea/
