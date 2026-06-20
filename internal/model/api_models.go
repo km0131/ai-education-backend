@@ -31,3 +31,20 @@ type CreateClassInput struct {
 	ClassName   string `json:"className" binding:"required"`
 	Description string `json:"description"`
 }
+
+// クラス参加用
+type CreateClassOutput struct {
+	InviteCode string `json:"inviteCode" binding:"required"`
+}
+
+// クラス送信用
+type ClassSend struct {
+	Id           string    `json:"id"`
+	Title        string    `json:"title"`
+	Description  string    `json:"description"`
+	TeacherName  string    `json:"teacher_name"`
+	StudentCount int       `json:"student_count"`
+	InviteCode   string    `json:"invite_code"`
+	ThemeColor   string    `json:"theme_color"`
+	UpdataTime   time.Time `json:"updata_time"`
+}

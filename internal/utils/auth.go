@@ -1,15 +1,19 @@
 package utils
 
 import (
+	"ai-education/backend/internal/db"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
+	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/argon2"
+	"gorm.io/gorm"
 )
 
 // defaultParams はArgon2の推奨パラメータを設定します。
@@ -122,4 +126,46 @@ func generateRandomToken() string {
 	b := make([]byte, 16) // 16バイトのランダム値
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// AuthMiddleware ログイン認証を行うミドルウェア
+func AuthMiddleware(gormDB *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"status": "error", "message": "Authorization ヘッダーがありません"})
+			c.Abort() // 👈 重要なポイント：以降のハンドラー処理を強制中断する
+			return
+		}
+
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) != 2 || parts[0] != "Bearer" {
+			c.JSON(http.StatusUnauthorized, gin.H{"status": "error", "message": "Authorization ヘッダーの形式が正しくありません(Bearer を使用してください)"})
+			c.Abort()
+			return
+		}
+		tokenString := parts[1]
+
+		claims, err := VerifyPasetoToken(tokenString)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"status": "error", "message": "トークンが正しくないか、有効期限が切れています"})
+			c.Abort()
+			return
+		}
+
+		// DBからユーザーを取得
+		user, err := db.FindUserByID(gormDB, claims.UserID.String())
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "ユーザーが存在しません"})
+			c.Abort()
+			return
+		}
+
+		// 🌟 コンテキストにユーザー情報をセットして、後ろのハンドラーに引き継ぐ
+		c.Set("UserName", user.Name)
+		c.Set("UserID", user.ID) // UUID型でも持っておくと後で楽
+		c.Set("UserTeacher", user.Teacher)
+
+		c.Next() // 👈 次の処理（実際のAPIハンドラー）へ進む
+	}
 }

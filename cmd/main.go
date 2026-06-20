@@ -8,6 +8,7 @@ import (
 
 	"ai-education/backend/internal/db"
 	"ai-education/backend/internal/handler"
+	"ai-education/backend/internal/utils"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -39,10 +40,11 @@ func main() {
 	r := gin.Default()
 
 	r.Use(cors.New(cors.Config{
-		AllowOrigins: []string{"*"},
-		AllowMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowHeaders: []string{"Origin", "Content-Type", "Accept"},
-		MaxAge:       12 * time.Hour,
+		AllowOrigins:     []string{"*"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
+		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
 	}))
 
 	// ハンドラーの初期化
@@ -66,7 +68,15 @@ func main() {
 	{
 		// main関数の中のインライン定義ではなく、上で定義した関数を使う
 		v1.GET("/ping", PingHandler)
-		v1.POST("/create_class", h.CreateClass)
+		authGroup := v1.Group("/")
+		authGroup.Use(utils.AuthMiddleware(h.DB))
+		{
+			authGroup.POST("/create_class", h.CreateClass)
+			authGroup.POST("/join_class", h.JoinClass)
+			authGroup.GET("/user", h.User)
+			authGroup.GET("/my_courses", h.MyCourses)
+			authGroup.GET("/courses/:id", h.RemoveClass)
+		}
 	}
 
 	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))

@@ -224,8 +224,6 @@ func (h *Handler) PostLoginRegistrer(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"password": true,
 			"token":    token,
-			"name":     fetchedUser.Name,
-			"teacher":  fetchedUser.Teacher,
 		})
 	} else {
 		c.JSON(http.StatusOK, gin.H{
@@ -280,8 +278,6 @@ func (h *Handler) PostLoginQR(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"password": true,
 			"token":    token,
-			"name":     fetchedUser.Name,
-			"teacher":  fetchedUser.Teacher,
 		})
 	} else {
 		c.JSON(http.StatusOK, gin.H{
@@ -355,4 +351,32 @@ func (h *Handler) PostLoginByImages(rawPassword string) (string, error) {
 	combinedName := strings.Join(nameList, "")
 
 	return combinedName, nil
+}
+
+func (h *Handler) User(c *gin.Context) {
+	userNameAny, existsName := c.Get("UserName")
+	isTeacherAny, existsTeacher := c.Get("UserTeacher")
+
+	// どちらか1つでも存在しなければエラーにする
+	if !existsName || !existsTeacher {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ユーザー情報の取得に失敗しました"})
+		return
+	}
+	currentUserName, ok1 := userNameAny.(string)
+	if !ok1 {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "ユーザー情報の型変換に失敗しました"})
+		return
+	}
+	nameParts := strings.FieldsFunc(currentUserName, func(r rune) bool {
+		return r == '-' || r == '‐'
+	})
+	userName := userNameAny
+	if len(nameParts) > 0 {
+		userName = nameParts[0]
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"UserName":  userName,
+		"IsTeacher": isTeacherAny,
+	})
 }
