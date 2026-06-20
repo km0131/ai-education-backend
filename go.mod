@@ -15,6 +15,8 @@ require (
 )
 
 require (
+	aidanwoods.dev/go-paseto v1.6.0 // indirect
+	aidanwoods.dev/go-result v0.3.1 // indirect
 	github.com/KyleBanks/depth v1.2.1 // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect
 	github.com/bytedance/sonic v1.15.0 // indirect

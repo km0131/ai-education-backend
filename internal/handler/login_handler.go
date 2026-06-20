@@ -216,8 +216,16 @@ func (h *Handler) PostLoginRegistrer(c *gin.Context) {
 
 	// DBから取得したパスワードと照合
 	if match {
+		token, err := utils.GeneratePasetoToken(fetchedUser.ID)
+		if err != nil {
+			c.JSON(500, gin.H{"error": "トークン生成失敗"})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{
 			"password": true,
+			"token":    token,
+			"name":     fetchedUser.Name,
+			"teacher":  fetchedUser.Teacher,
 		})
 	} else {
 		c.JSON(http.StatusOK, gin.H{
@@ -237,19 +245,50 @@ func (h *Handler) PostLoginQR(c *gin.Context) {
 		h.respondError(c, http.StatusBadRequest, "QRログイン", "リクエストの形式が不正です", err)
 		return
 	}
+	// 送られてきた文字列から ID と pass を抽出する
+	data := req.QRData
+	// プレフィックスや区切り文字（$）が含まれているかチェック
+	if !strings.Contains(data, "$ID=") || !strings.Contains(data, "$pass=") {
+		h.respondError(c, http.StatusUnauthorized, "QRログイン", "無効なQRコードの形式です", nil)
+		return
+	}
+	// 文字列を分解して値を取り出す
+	parts := strings.Split(data, "$")
+	var extractedID, extractedPass string
+	for _, part := range parts {
+		if strings.HasPrefix(part, "ID=") {
+			extractedID = strings.TrimPrefix(part, "ID=")
+		} else if strings.HasPrefix(part, "pass=") {
+			extractedPass = strings.TrimPrefix(part, "pass=")
+		}
+	}
 
-	// 簡易実装: QRコードからユーザーIDを抽出
-	// 実際の実装では復号化と照合が必要
-	if req.QRData == "" {
-		h.respondError(c, http.StatusUnauthorized, "QRログイン", "無効なQRデータです", nil)
+	fetchedUser, err := db.FindUserByID(h.DB, extractedID)
+	if err != nil {
+		h.respondError(c, http.StatusUnauthorized, "画像照合", "ユーザーが見つかりませんでした", err)
 		return
 	}
 
-	// ここでは簡易実装として、QRコードが有効と仮定
-	c.JSON(http.StatusOK, gin.H{
-		"status":   "success",
-		"password": true,
-	})
+	match, err := utils.VerifyPassword(extractedPass, fetchedUser.QRpassword)
+
+	if match {
+		token, err := utils.GeneratePasetoToken(fetchedUser.ID)
+		if err != nil {
+			c.JSON(500, gin.H{"error": "トークン生成失敗"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"password": true,
+			"token":    token,
+			"name":     fetchedUser.Name,
+			"teacher":  fetchedUser.Teacher,
+		})
+	} else {
+		c.JSON(http.StatusOK, gin.H{
+			"password": false,
+			"error":    "パスワードが一致しません",
+		})
+	}
 }
 
 // serializeIntSlice はintのスライスをカンマ区切りの文字列に変換します。

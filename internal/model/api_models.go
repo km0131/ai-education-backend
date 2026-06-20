@@ -25,3 +25,9 @@ type LoginRequest struct {
 	Username string `json:"username" binding:"required"`
 	Images   []int  `json:"images" binding:"required"`
 }
+
+// フロントエンドから送られてくるJSONをマッピングする構造体
+type CreateClassInput struct {
+	ClassName   string `json:"className" binding:"required"`
+	Description string `json:"description"`
+}

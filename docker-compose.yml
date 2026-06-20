@@ -35,6 +35,7 @@ services:
     ports:
       - "8080:8080"
     environment:
+      - CHOKIDAR_USEPOLLING=true
       - GIN_MODE=release
       - DB_HOST=db
       - DB_USER=${DB_USER}
@@ -44,6 +45,7 @@ services:
     volumes:
       # ${PWD}/images が存在することを確認してください
       - ./images:/app/images:Z
+      - .:/app:Z
     depends_on:
       db:
         condition: service_healthy

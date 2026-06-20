@@ -46,6 +46,22 @@ type Course struct {
 	ThemeColor  string
 }
 
+// 生徒とクラスを結ぶリレーションテーブル
+type CourseEnrollment struct {
+	gorm.Model
+	// クラスへの外部キー
+	CourseID uint   `gorm:"not null;index:idx_course_user,unique;comment:クラスID"`
+	Course   Course `gorm:"foreignKey:CourseID;constraint:OnDelete:CASCADE"`
+
+	// ユーザーへの外部キー
+	UserID uuid.UUID `gorm:"type:uuid;not null;index:idx_course_user,unique;comment:ユーザーID"`
+	User   User      `gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE"`
+
+	// 拡張用フィールド（必要に応じて）
+	Role       string    `gorm:"type:varchar(20);default:'student';comment:クラス内ロール(student/co-teacher)"`
+	EnrolledAt time.Time `gorm:"autoCreateTime;comment:参加日時"`
+}
+
 // Enrollment はクラス履修関係の永続化モデルです。
 type Enrollment struct {
 	gorm.Model

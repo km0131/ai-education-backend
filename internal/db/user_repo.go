@@ -3,9 +3,11 @@ package db
 import (
 	"ai-education/backend/internal/model"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -61,6 +63,13 @@ func FindUserByName(db *gorm.DB, username string) (model.User, error) {
 	return user, result.Error
 }
 
+// FindUserByID はIDを元にユーザーを検索します。
+func FindUserByID(db *gorm.DB, userid string) (model.User, error) {
+	var user model.User
+	result := db.Where("id = ?", userid).First(&user)
+	return user, result.Error
+}
+
 // 名前の一意性を保つために4桁のUUIDを生成し追加
 func createUniqueUsername(desiredName string) (string, error) {
 	// ユーザー名の長さ制限に合わせて、希望の名前を正規化/短縮する
@@ -69,7 +78,7 @@ func createUniqueUsername(desiredName string) (string, error) {
 		return "", fmt.Errorf("ユーザー名の正規化に失敗しました: %w", err)
 	}
 	// ４文字のランダムなサフィックスを生成
-	suffix, err := generateRandomSuffix(4)
+	suffix, err := GenerateRandomSuffix(4)
 	if err != nil {
 		return "", fmt.Errorf("ユーザー名のサフィックス生成に失敗しました: %w", err)
 	}
@@ -96,7 +105,7 @@ func normalizeJapaneseUsername(desiredName string) (string, error) {
 }
 
 // UUIDの生成名前用
-func generateRandomSuffix(length int) (string, error) {
+func GenerateRandomSuffix(length int) (string, error) {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	result := make([]byte, length)
 
@@ -110,4 +119,19 @@ func generateRandomSuffix(length int) (string, error) {
 	}
 
 	return string(result), nil
+}
+
+// 先生チェック
+func TeacherCheck(db *gorm.DB, userID uint) (string, uuid.UUID, error) {
+	// ユーザ情報取得
+	user, err := FindUserByName(db, strconv.Itoa(int(userID)))
+	if err != nil {
+		return "", uuid.Nil, err
+	}
+	// 先生チェック
+	if user.Teacher == true {
+		return "", uuid.Nil, errors.New("ユーザーは先生ではありません")
+	}
+	// 先生だった場合は、そのロール名を返す
+	return strconv.Itoa(int(userID)), user.ID, nil
 }

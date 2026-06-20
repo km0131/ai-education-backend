@@ -164,6 +164,13 @@ air -c .air.toml
 
 ---
 
+## トークンのキー作成
+```bash
+openssl rand -hex 32
+```
+
+---
+
 ## 本番環境
 
 ### API

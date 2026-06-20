@@ -66,6 +66,7 @@ func main() {
 	{
 		// main関数の中のインライン定義ではなく、上で定義した関数を使う
 		v1.GET("/ping", PingHandler)
+		v1.POST("/create_class", h.CreateClass)
 	}
 
 	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))

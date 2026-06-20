@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"ai-education/backend/internal/model"
+
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -70,6 +71,7 @@ func Migrate() error {
 		&model.AiModel{},
 		&model.RegistrationTicket{},
 		&model.SystemLog{},
+		&model.CourseEnrollment{},
 	}
 
 	// まとめて実行

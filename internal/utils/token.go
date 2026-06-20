@@ -1,68 +1,99 @@
 package utils
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
-	"ai-education/backend/internal/model"
+	"aidanwoods.dev/go-paseto"
+	"github.com/google/uuid"
 )
 
 var (
-	tokenKey string
+	symmetricKey  paseto.V4SymmetricKey
+	tokenLifetime time.Duration
 )
 
 func init() {
-	tokenKey = os.Getenv("PASETO_KEY")
-	if tokenKey == "" {
-		// 開発環境用のデフォルト値（本番環境では使用厳禁）
-		tokenKey = "development-key-please-set-in-env-var"
+
+	keyStr := os.Getenv("PASETO_KEY")
+	if keyStr == "" {
+		panic("PASETO_KEY が設定されていません")
 	}
+
+	var err error
+	symmetricKey, err = paseto.V4SymmetricKeyFromHex(keyStr)
+	if err != nil {
+		panic(fmt.Sprintf("不正なPASETO_KEY: %v", err))
+	}
+
+	expHoursStr := os.Getenv("PASETO_EXPIRATION_HOURS")
+	if expHoursStr == "" {
+		expHoursStr = "24"
+	}
+
+	expHours, err := strconv.Atoi(expHoursStr)
+	if err != nil {
+		panic("PASETO_EXPIRATION_HOURS は整数で指定してください")
+	}
+
+	tokenLifetime = time.Duration(expHours) * time.Hour
 }
 
-// GeneratePasetoToken はシンプルなトークンを生成します。
-// 実装上は Base64 エンコード + HMAC を使用した簡易トークンです。
-// 本番環境では https://github.com/o1egl/paseto を使用してください。
-func GeneratePasetoToken(userID uint, username string) (string, error) {
+// CustomClaims はトークンに埋め込む独自データです
+type CustomClaims struct {
+	UserID uuid.UUID `json:"user_id"`
+}
+
+// GeneratePasetoToken は PASETO v4.Local トークンを生成します（暗号化＋改ざん検知）
+func GeneratePasetoToken(userID uuid.UUID) (string, error) {
 	now := time.Now()
-	claims := model.TokenClaims{
-		UserID:    userID,
-		Username:  username,
-		IssuedAt:  now,
-		ExpiresAt: now.Add(24 * time.Hour),
-	}
 
-	jsonData, err := json.Marshal(claims)
+	// 1. 標準の暗号化クレーム（有効期限など）を設定
+	token := paseto.NewToken()
+	token.SetIssuedAt(now)
+	token.SetNotBefore(now)
+	token.SetExpiration(now.Add(tokenLifetime))
+
+	// 2. 独自のユーザー情報を埋め込む
+	err := token.Set("user_id", userID.String())
 	if err != nil {
-		return "", fmt.Errorf("トークンの生成に失敗しました: %w", err)
+		return "", err
 	}
 
-	// Base64 エンコード
-	token := base64.StdEncoding.EncodeToString(jsonData)
-	return token, nil
+	// 3. V4Local（共通鍵暗号）方式で暗号化してトークン文字列を生成
+	// これにより、第三者には中身を一切解読できない文字列（v4.local.〜）になります
+	tokenString := token.V4Encrypt(symmetricKey, nil)
+
+	return tokenString, nil
 }
 
-// VerifyPasetoToken はトークンを検証し、クレームを返します。
-func VerifyPasetoToken(tokenString string) (*model.TokenClaims, error) {
-	// Base64 デコード
-	jsonData, err := base64.StdEncoding.DecodeString(tokenString)
+// VerifyPasetoToken はトークンを復号・検証し、ユーザー情報を返します
+func VerifyPasetoToken(tokenString string) (*CustomClaims, error) {
+	// v4用のパーサー（検証器）を作成
+	parser := paseto.NewParser()
+
+	// トークンを復号・検証
+	token, err := parser.ParseV4Local(symmetricKey, tokenString, nil)
 	if err != nil {
-		return nil, errors.New("トークンの形式が不正です")
+		return nil, errors.New("トークンが不正、または有効期限が切れています")
 	}
 
-	var claims model.TokenClaims
-	err = json.Unmarshal(jsonData, &claims)
+	// データの取り出し
+	var userIDStr string
+
+	if err := token.Get("user_id", &userIDStr); err != nil {
+		return nil, errors.New("トークン内のユーザーIDが不正です")
+	}
+
+	userID, err := uuid.Parse(userIDStr)
 	if err != nil {
-		return nil, errors.New("トークンの内容が不正です")
+		return nil, errors.New("UUID形式が不正です")
 	}
 
-	// 有効期限チェック
-	if time.Now().After(claims.ExpiresAt) {
-		return nil, errors.New("トークンの有効期限が切れています")
-	}
-
-	return &claims, nil
+	return &CustomClaims{
+		UserID: userID,
+	}, nil
 }
