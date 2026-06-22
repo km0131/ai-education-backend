@@ -64,14 +64,19 @@ func Migrate() error {
 	models := []interface{}{
 		&model.User{},
 		&model.Certification{},
-		&model.Course{},
-		&model.Enrollment{},
-		&model.AiExplanation{},
-		&model.AiPhotograph{},
-		&model.AiModel{},
 		&model.RegistrationTicket{},
 		&model.SystemLog{},
+		// クラス関連
+		&model.Course{},
 		&model.CourseEnrollment{},
+		&model.Enrollment{},
+		// AIプロジェクト設計基盤
+		&model.AiConfiguration{}, // 親
+		&model.AiCategory{},      // 子(ConfigID)
+		&model.AiPhotograph{},    // 孫(CategoryID)
+		// AI学習と推論
+		&model.AiModel{},       // 紐付き(ConfigID)
+		&model.AiTrainingJob{}, // 紐付き(ConfigID)
 	}
 
 	// まとめて実行

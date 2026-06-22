@@ -7,6 +7,8 @@ import (
 	"gorm.io/gorm"
 )
 
+type FloatSlice []float64
+
 // RegistrationTicket は仮登録時に発行するチケットの永続化モデルです。
 type RegistrationTicket struct {
 	ID               string    `gorm:"primaryKey" json:"id"`
@@ -70,32 +72,6 @@ type Enrollment struct {
 	StudentID uuid.UUID `gorm:"type:uuid;not null;index"`
 }
 
-// AiExplanation はAI説明セットの親テーブルです。
-type AiExplanation struct {
-	gorm.Model
-	StudentID   uuid.UUID      `gorm:"type:uuid;not null;index"`
-	CourseID    uint           `gorm:"not null;index"`
-	Name        string         `gorm:"size:255"`
-	Explanation string         `gorm:"type:text"`
-	Photographs []AiPhotograph `gorm:"foreignKey:AiExplanationID"`
-}
-
-// AiPhotograph はAI説明セットの子テーブルです。
-type AiPhotograph struct {
-	gorm.Model
-	AiExplanationID uint   `gorm:"not null;index"`
-	PhotographPath  string `gorm:"not null"`
-}
-
-// AiModel は学習済みモデル情報の永続化モデルです。
-type AiModel struct {
-	gorm.Model
-	StudentID uuid.UUID `gorm:"type:uuid;not null;index"`
-	CourseID  uint      `gorm:"not null;index"`
-	ModelPath string    `json:"model_path"`
-	IsReady   bool      `json:"is_ready"`
-}
-
 // システムのログを保存するテーブル
 type SystemLog struct {
 	ID        uint      `gorm:"primaryKey"`
@@ -105,4 +81,57 @@ type SystemLog struct {
 	Message   string    `gorm:"type:text"`              // ログの詳細メッセージ
 	Detail    string    `gorm:"type:text"`              // 元のエラーメッセージ
 	Timestamp time.Time `gorm:"autoCreateTime"`         // ログのタイムスタンプ
+}
+
+// AiConfiguration: AIプロジェクトの「箱」
+// 作成者とコースが紐付き、複数回学習（再学習）のベースとなる
+type AiConfiguration struct {
+	gorm.Model
+	ProjectUUID uuid.UUID `gorm:"type:uuid;uniqueIndex;not null"` // 外部参照・共有用UUID
+	StudentID   uuid.UUID `gorm:"type:uuid;not null;index"`       // プロジェクト作成者
+	CourseID    uint      `gorm:"not null;index"`                 // 所属クラス
+	Title       string    `gorm:"size:255"`                       // プロジェクト名
+	IsShared    bool      `gorm:"default:false"`                  // クラスメンバーと共有するかどうか
+	// リレーション
+	Categories   []AiCategory    `gorm:"foreignKey:ConfigID"` // ラベル
+	TrainingJobs []AiTrainingJob `gorm:"foreignKey:ConfigID"` // 学習履歴
+}
+
+// AiCategory: ラベル情報
+// 「作り直し」に対応するため、ConfigIDとIndexで最新を追跡する
+type AiCategory struct {
+	gorm.Model
+	ConfigID      uuid.UUID      `gorm:"not null;index"`
+	CategoryID    uuid.UUID      `gorm:"not null;index"`
+	CategoryIndex int            `gorm:"not null"`
+	Title         string         `gorm:"size:255"`  // ラベル名
+	Explanation   string         `gorm:"type:text"` // 説明文
+	Photographs   []AiPhotograph `gorm:"foreignKey:CategoryID"`
+}
+
+// AiPhotograph: 学習データの最小単位
+type AiPhotograph struct {
+	gorm.Model
+	CategoryID     uuid.UUID `gorm:"not null;index"`
+	StudentID      uuid.UUID `gorm:"type:uuid;not null;index"`
+	PhotographPath string    `gorm:"not null"`
+	IsAnalyzed     bool      `gorm:"default:false"`
+	// --- 画像1枚ごとの統計情報 ---
+	Saturation      float64    `gorm:"type:float"` // 彩度
+	Brightness      float64    `gorm:"type:float"` // 明度
+	Sharpness       float64    `gorm:"type:float"` // 追加
+	DiversityVector FloatSlice `gorm:"type:jsonb"` // 追加: 配列を格納
+}
+
+// AiTrainingJob: 学習の「バージョン」を管理
+// ユーザーが「再学習」を押すたびに、このレコードが一つ増える
+type AiTrainingJob struct {
+	gorm.Model
+	ConfigID  uuid.UUID `gorm:"not null;index"`
+	Status    string    `gorm:"type:varchar(20)"` // pending, completed等
+	ModelPath string    `gorm:"size:255"`         // 作成されたモデルファイルへのパス
+	// --- 学習実行時のデータセット統計 ---
+	AvgSaturation  float64 `gorm:"type:float"` // 使用した画像全体の平均彩度
+	DiversityScore float64 `gorm:"type:float"` // この学習データセットの多様性スコア
+	Accuracy       float64 `gorm:"type:float"` // 学習結果の精度
 }

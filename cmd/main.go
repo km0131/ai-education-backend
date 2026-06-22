@@ -1,6 +1,7 @@
 package main // ← 必ず1行目！
 
 import (
+	"ai-education/backend/internal/worker"
 	"log"
 	"time"
 
@@ -33,6 +34,7 @@ func PingHandler(c *gin.Context) {
 // @host            localhost:8080
 // @BasePath        /
 func main() {
+	go worker.StartAnalysisWorker()
 
 	db.InitDB()
 	db.Migrate()
@@ -76,6 +78,11 @@ func main() {
 			authGroup.GET("/user", h.User)
 			authGroup.GET("/my_courses", h.MyCourses)
 			authGroup.GET("/courses/:id", h.RemoveClass)
+			aiGroup := authGroup.Group("/ai")
+			aiGroup.Use(utils.AuthMiddleware(h.DB))
+			{
+				aiGroup.POST("/upload_image", h.UploadImage)
+			}
 		}
 	}
 

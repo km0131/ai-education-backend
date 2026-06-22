@@ -3,16 +3,17 @@ package handler
 import (
 	"ai-education/backend/internal/db"
 	"ai-education/backend/internal/model"
+	"ai-education/backend/internal/utils"
 	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
 func (h *Handler) MyCourses(c *gin.Context) {
-	userId, isTeacher, ok := getAuthUser(c)
-	if !ok {
+	isTeacher, ok := utils.GetUserTeacher(c)
+	userId, ok1 := utils.GetUserID(c)
+	if !ok || !ok1 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "認証情報の取得または型変換に失敗しました"})
 		return
 	}
@@ -57,8 +58,9 @@ func (h *Handler) MyCourses(c *gin.Context) {
 }
 
 func (h *Handler) CreateClass(c *gin.Context) {
-	userId, isTeacher, ok := getAuthUser(c)
-	if !ok {
+	isTeacher, ok := utils.GetUserTeacher(c)
+	userId, ok1 := utils.GetUserID(c)
+	if !ok || !ok1 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "認証情報の取得または型変換に失敗しました"})
 		return
 	}
@@ -93,8 +95,9 @@ func (h *Handler) CreateClass(c *gin.Context) {
 
 // クラス参加
 func (h *Handler) JoinClass(c *gin.Context) {
-	userId, isTeacher, ok := getAuthUser(c)
-	if !ok {
+	isTeacher, ok := utils.GetUserTeacher(c)
+	userId, ok1 := utils.GetUserID(c)
+	if !ok || !ok1 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "認証情報の取得または型変換に失敗しました"})
 		return
 	}
@@ -131,24 +134,6 @@ func (h *Handler) JoinClass(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "クラスに参加しました！"})
 }
 
-// ユーザー情報を一括で安全に取得する共通ヘルパー
-func getAuthUser(c *gin.Context) (uuid.UUID, bool, bool) {
-	userIdAny, existsId := c.Get("UserID")
-	isTeacherAny, existsTeacher := c.Get("UserTeacher")
-
-	if !existsId || !existsTeacher {
-		return uuid.Nil, false, false
-	}
-
-	userId, ok1 := userIdAny.(uuid.UUID)
-	isTeacher, ok2 := isTeacherAny.(bool)
-	if !ok1 || !ok2 {
-		return uuid.Nil, false, false
-	}
-
-	return userId, isTeacher, true
-}
-
 // クラス名取得
 func (h *Handler) RemoveClass(c *gin.Context) {
 	classID := c.Param("id")
@@ -156,14 +141,9 @@ func (h *Handler) RemoveClass(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "クラスIDが指定されていません"})
 		return
 	}
-	userIdAny, existsId := c.Get("UserID")
-	if !existsId {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "認証情報が見つかりません"})
-		return
-	}
-	userId, ok1 := userIdAny.(uuid.UUID)
-	if !ok1 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "型変換エラー"})
+	userId, ok := utils.GetUserID(c)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "認証情報の取得または型変換に失敗しました"})
 		return
 	}
 	res, err := db.GetClassDetailsForUser(h.DB, classID, userId)

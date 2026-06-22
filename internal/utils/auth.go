@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"golang.org/x/crypto/argon2"
 	"gorm.io/gorm"
 )
@@ -168,4 +169,24 @@ func AuthMiddleware(gormDB *gorm.DB) gin.HandlerFunc {
 
 		c.Next() // 👈 次の処理（実際のAPIハンドラー）へ進む
 	}
+}
+
+// UUIDでのヘルパー関数
+func GetUserID(c *gin.Context) (uuid.UUID, bool) {
+	val, exists := c.Get("UserID")
+	if !exists {
+		return uuid.Nil, false
+	}
+	userID, ok := val.(uuid.UUID)
+	return userID, ok
+}
+
+// GetUserTeacher はコンテキストからTeacherフラグを取得します
+func GetUserTeacher(c *gin.Context) (bool, bool) {
+	val, exists := c.Get("UserTeacher")
+	if !exists {
+		return false, false
+	}
+	isTeacher, ok := val.(bool)
+	return isTeacher, ok
 }

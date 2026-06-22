@@ -48,3 +48,20 @@ type ClassSend struct {
 	ThemeColor   string    `json:"theme_color"`
 	UpdataTime   time.Time `json:"updata_time"`
 }
+
+// 画像アップロード時のリクエスト構造体（multipart用とは別にJSONとして扱う場合）
+type ImageUploadRequest struct {
+	CourseID   uint   `form:"course_id" binding:"required"`
+	CategoryID uint   `form:"category_id" binding:"required"`
+	Title      string `form:"title" binding:"required"`
+}
+
+type AnalysisData struct {
+	// GORM用のIDが必要な場合、gorm.Modelを埋め込むか明示的に定義
+	PhotoID         int        `json:"photo_id" gorm:"primaryKey"`
+	Saturation      float64    `json:"saturation" gorm:"type:float"`
+	Brightness      float64    `json:"brightness" gorm:"type:float"`
+	Sharpness       float64    `json:"sharpness" gorm:"type:float"`
+	DiversityVector FloatSlice `json:"diversity_vector" gorm:"type:jsonb"` // 上記のFloatSlice型を利用
+	Message         string     `json:"message"`
+}
