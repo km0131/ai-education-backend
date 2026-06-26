@@ -42,6 +42,8 @@ services:
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
       - DB_PORT=${DB_PORT}
+      # - PYTHON_ANALYSIS_API_URL=${PYTHON_ANALYSIS_API_URL}
+      - PYTHON_ANALYSIS_API_URL=http://10.89.5.1:5000/analyze
     volumes:
       # ${PWD}/images が存在することを確認してください
       - ./images:/app/images:Z

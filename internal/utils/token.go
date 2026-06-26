@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"aidanwoods.dev/go-paseto"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
@@ -96,4 +97,27 @@ func VerifyPasetoToken(tokenString string) (*CustomClaims, error) {
 	return &CustomClaims{
 		UserID: userID,
 	}, nil
+}
+
+// MachineToMachineAuth ミドルウェア：Python用
+func MachineToMachineAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// 環境変数からM2M専用の合言葉を取得（PASETOの鍵とは別のものを推奨）
+		secretToken := os.Getenv("CALLBACK_SECRET")
+		if secretToken == "" {
+			// 未設定時のフォールバック（本番では必ず環境変数に設定してください）
+			panic("PASETO_KEY が設定されていません")
+		}
+
+		authHeader := c.GetHeader("Authorization")
+		expectedHeader := "Bearer " + secretToken
+
+		if authHeader != expectedHeader {
+			c.JSON(401, gin.H{"error": "Unauthorized: システム間認証トークンが一致しません"})
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
 }

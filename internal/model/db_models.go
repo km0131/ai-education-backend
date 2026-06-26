@@ -84,54 +84,65 @@ type SystemLog struct {
 }
 
 // AiConfiguration: AIプロジェクトの「箱」
-// 作成者とコースが紐付き、複数回学習（再学習）のベースとなる
 type AiConfiguration struct {
-	gorm.Model
-	ProjectUUID uuid.UUID `gorm:"type:uuid;uniqueIndex;not null"` // 外部参照・共有用UUID
-	StudentID   uuid.UUID `gorm:"type:uuid;not null;index"`       // プロジェクト作成者
-	CourseID    uint      `gorm:"not null;index"`                 // 所属クラス
-	Title       string    `gorm:"size:255"`                       // プロジェクト名
-	IsShared    bool      `gorm:"default:false"`                  // クラスメンバーと共有するかどうか
-	// リレーション
-	Categories   []AiCategory    `gorm:"foreignKey:ConfigID"` // ラベル
-	TrainingJobs []AiTrainingJob `gorm:"foreignKey:ConfigID"` // 学習履歴
+	gorm.Model // id (bigint) は自動生成される
+	// 🌟 referencesの対象にするため uniqueIndex を明示
+	ProjectUUID uuid.UUID `gorm:"type:uuid;uniqueIndex;not null"`
+	StudentID   uuid.UUID `gorm:"type:uuid;not null;index"`
+	CourseID    uint      `gorm:"not null;index"`
+	Title       string    `gorm:"size:255"`
+	IsShared    bool      `gorm:"default:false"`
+
+	// リレーション：参照先（references）にProjectUUIDを明示
+	Categories   []AiCategory    `gorm:"foreignKey:ConfigID;references:ProjectUUID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE;"`
+	TrainingJobs []AiTrainingJob `gorm:"foreignKey:ConfigID;references:ProjectUUID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE;"`
 }
 
 // AiCategory: ラベル情報
-// 「作り直し」に対応するため、ConfigIDとIndexで最新を追跡する
 type AiCategory struct {
-	gorm.Model
-	ConfigID      uuid.UUID      `gorm:"not null;index"`
-	CategoryID    uuid.UUID      `gorm:"not null;index"`
-	CategoryIndex int            `gorm:"not null"`
-	Title         string         `gorm:"size:255"`  // ラベル名
-	Explanation   string         `gorm:"type:text"` // 説明文
-	Photographs   []AiPhotograph `gorm:"foreignKey:CategoryID"`
+	gorm.Model              // id (bigint) は自動生成される
+	ConfigID      uuid.UUID `gorm:"type:uuid;not null;index"`
+	CategoryID    uuid.UUID `gorm:"type:uuid;uniqueIndex;not null"`
+	CategoryIndex int       `gorm:"not null"`
+	Title         string    `gorm:"size:255"`
+	Explanation   string    `gorm:"type:text"`
+
+	// リレーション：参照先（references）にCategoryIDを明示
+	Photographs []AiPhotograph `gorm:"foreignKey:CategoryID;references:CategoryID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE;"`
 }
 
 // AiPhotograph: 学習データの最小単位
 type AiPhotograph struct {
-	gorm.Model
-	CategoryID     uuid.UUID `gorm:"not null;index"`
+	gorm.Model // id (bigint) は自動生成される
+	// 🌟 親の参照先に合わせて明確に type:uuid を指定
+	CategoryID     uuid.UUID `gorm:"type:uuid;not null;index"`
 	StudentID      uuid.UUID `gorm:"type:uuid;not null;index"`
 	PhotographPath string    `gorm:"not null"`
 	IsAnalyzed     bool      `gorm:"default:false"`
-	// --- 画像1枚ごとの統計情報 ---
-	Saturation      float64    `gorm:"type:float"` // 彩度
-	Brightness      float64    `gorm:"type:float"` // 明度
-	Sharpness       float64    `gorm:"type:float"` // 追加
-	DiversityVector FloatSlice `gorm:"type:jsonb"` // 追加: 配列を格納
+
+	Saturation      float64    `gorm:"type:float"`
+	Brightness      float64    `gorm:"type:float"`
+	Sharpness       float64    `gorm:"type:float"`
+	DiversityVector FloatSlice `gorm:"type:jsonb"`
 }
 
 // AiTrainingJob: 学習の「バージョン」を管理
-// ユーザーが「再学習」を押すたびに、このレコードが一つ増える
 type AiTrainingJob struct {
+	gorm.Model               // id (bigint) は自動生成される
+	ConfigID       uuid.UUID `gorm:"type:uuid;not null;uniqueIndex:idx_config_status"`
+	Status         string    `gorm:"type:varchar(20);uniqueIndex:idx_config_status"`
+	ModelPath      string    `gorm:"size:255"`
+	AvgSaturation  float64   `gorm:"type:float"`
+	DiversityScore float64   `gorm:"type:float"`
+	Accuracy       float64   `gorm:"type:float"`
+	LearningCurve  string    `gorm:"type:text"`         // 3モデル分の学習履歴JSONが入る
+	ModelZipPath   string    `gorm:"type:varchar(255)"` // 解凍・配置したモデルのパスなど
+}
+
+// AiTrainingJobSnapshot: どのJobにどの写真が含まれていたかの中間テーブル
+type AiTrainingJobSnapshot struct {
 	gorm.Model
-	ConfigID  uuid.UUID `gorm:"not null;index"`
-	Status    string    `gorm:"type:varchar(20)"` // pending, completed等
-	ModelPath string    `gorm:"size:255"`         // 作成されたモデルファイルへのパス
-	// --- 学習実行時のデータセット統計 ---
-	AvgSaturation  float64 `gorm:"type:float"` // 使用した画像全体の平均彩度
-	DiversityScore float64 `gorm:"type:float"` // この学習データセットの多様性スコア
-	Accuracy       float64 `gorm:"type:float"` // 学習結果の精度
+	AiTrainingJobID uint `gorm:"not null;index"` // どの学習バージョンか
+	PhotographID    uint `gorm:"not null"`       // どの写真か
+	LabelID         int  `gorm:"not null"`       // その時点でのラベル番号
 }

@@ -75,8 +75,8 @@ func Migrate() error {
 		&model.AiCategory{},      // 子(ConfigID)
 		&model.AiPhotograph{},    // 孫(CategoryID)
 		// AI学習と推論
-		&model.AiModel{},       // 紐付き(ConfigID)
 		&model.AiTrainingJob{}, // 紐付き(ConfigID)
+		&model.AiTrainingJobSnapshot{},
 	}
 
 	// まとめて実行

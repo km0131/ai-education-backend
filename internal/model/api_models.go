@@ -1,6 +1,10 @@
 package model
 
-import "time"
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
 
 // RegisterRequest はユーザー登録APIのリクエストボディです。
 type RegisterRequest struct {
@@ -51,9 +55,11 @@ type ClassSend struct {
 
 // 画像アップロード時のリクエスト構造体（multipart用とは別にJSONとして扱う場合）
 type ImageUploadRequest struct {
-	CourseID   uint   `form:"course_id" binding:"required"`
-	CategoryID uint   `form:"category_id" binding:"required"`
-	Title      string `form:"title" binding:"required"`
+	CourseID        uint   `form:"course_id" binding:"required"`
+	CategoryID      uint   `form:"category_id" binding:"required"`
+	CategoryTitle   string `form:"category_title" binding:"required"`
+	Title           string `form:"title" binding:"required"`
+	UploadSessionID string `form:"upload_session_id" binding:"required"`
 }
 
 type AnalysisData struct {
@@ -64,4 +70,31 @@ type AnalysisData struct {
 	Sharpness       float64    `json:"sharpness" gorm:"type:float"`
 	DiversityVector FloatSlice `json:"diversity_vector" gorm:"type:jsonb"` // 上記のFloatSlice型を利用
 	Message         string     `json:"message"`
+}
+
+// Ai作成用情報の送信
+type CategoryRequest struct {
+	ProjectUUID uuid.UUID `json:"project_uuid" binding:"required"`
+	Title       string    `json:"title" binding:"required"`
+	StudentName string    `json:"student_name" binding:"required"`
+	Status      string    `json:"status" binding:"required"`
+}
+
+// AIカード
+type AiCard struct {
+	ProjectUUID uuid.UUID `json:"project_uuid" binding:"required"`
+	Title       string    `json:"title" binding:"required"`
+	StudentName string    `json:"student_name" binding:"required"`
+	Status      string    `json:"status" binding:"required"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// PythonからAiを受け取る
+type ModelReadyInput struct {
+	JobID          uint    `form:"job_id" binding:"required"`
+	AvgSaturation  float64 `form:"avg_saturation"`
+	DiversityScore float64 `form:"diversity_score"`
+	Accuracy       float64 `form:"accuracy"`
+	Loss           float64 `form:"loss"`
+	LearningCurve  string  `form:"learning_curve" binding:"required"` // JSON文字列
 }

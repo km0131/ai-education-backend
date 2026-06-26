@@ -7,6 +7,7 @@ import (
 
 	_ "ai-education/backend/docs" // 1. swag initで生成されるdocsをインポート
 
+	"ai-education/backend/internal/controller"
 	"ai-education/backend/internal/db"
 	"ai-education/backend/internal/handler"
 	"ai-education/backend/internal/utils"
@@ -34,10 +35,11 @@ func PingHandler(c *gin.Context) {
 // @host            localhost:8080
 // @BasePath        /
 func main() {
-	go worker.StartAnalysisWorker()
 
 	db.InitDB()
 	db.Migrate()
+
+	worker.StartAnalysisWorker(db.DB)
 
 	r := gin.Default()
 
@@ -55,6 +57,7 @@ func main() {
 	}
 
 	r.GET("/images/certification/*filename", h.PostPasswordImage)
+	r.POST("/api/callback/model_ready", utils.MachineToMachineAuth(), controller.HandleModelReady)
 
 	v0 := r.Group("/api/v0")
 	{
@@ -82,6 +85,8 @@ func main() {
 			aiGroup.Use(utils.AuthMiddleware(h.DB))
 			{
 				aiGroup.POST("/upload_image", h.UploadImage)
+				aiGroup.POST("/aicard", h.AiCard)
+				aiGroup.POST("/ai_creation", h.AiCreation)
 			}
 		}
 	}
