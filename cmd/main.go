@@ -40,6 +40,7 @@ func main() {
 	db.Migrate()
 
 	worker.StartAnalysisWorker(db.DB)
+	worker.StartTrainWorker(db.DB)
 
 	r := gin.Default()
 
@@ -57,6 +58,8 @@ func main() {
 	}
 
 	r.GET("/images/certification/*filename", h.PostPasswordImage)
+	r.GET("/images/ai_photogrph/*filename", h.GetAiPhotographImage)
+	r.GET("/images/test_photogrph/*filename", h.GetTestImage)
 	r.POST("/api/callback/model_ready", utils.MachineToMachineAuth(), controller.HandleModelReady)
 
 	v0 := r.Group("/api/v0")
@@ -87,6 +90,24 @@ func main() {
 				aiGroup.POST("/upload_image", h.UploadImage)
 				aiGroup.POST("/aicard", h.AiCard)
 				aiGroup.POST("/ai_creation", h.AiCreation)
+				aiGroup.POST("/get_description", h.GetDescription)
+				aiGroup.PUT("/create_description", h.CreateDescription)
+				aiGroup.POST("/image_acquisition", h.ImageAcquisition)
+				aiGroup.POST("/image_updated", h.ImageUpdated)
+				aiGroup.POST("/delete_image", h.DeleteImage)
+				aiGroup.POST("/up_label", h.UpLabel)
+			}
+			testGroup := authGroup.Group("/test")
+			testGroup.Use(utils.AuthMiddleware(h.DB))
+			{
+				testGroup.POST("/uploading_test_image", h.UploadingTestImage)
+				testGroup.POST("/get_images", h.GetImage)
+				testGroup.POST("/delete_tsst_image", h.DeleteTestImage)
+				testGroup.POST("/get_test_label", h.GetTestLabel)
+				testGroup.POST("/up_test_label", h.UpTestLabel)
+				testGroup.POST("/get_test_label_map", h.GetTestLabelMap)
+				testGroup.POST("/up_test_label_map", h.UpStudentTestLabel)
+				testGroup.POST("/execution", h.TestExecution)
 			}
 		}
 	}

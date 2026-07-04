@@ -114,7 +114,7 @@ type AiCategory struct {
 // AiPhotograph: 学習データの最小単位
 type AiPhotograph struct {
 	gorm.Model // id (bigint) は自動生成される
-	// 🌟 親の参照先に合わせて明確に type:uuid を指定
+	// 親の参照先に合わせて明確に type:uuid を指定
 	CategoryID     uuid.UUID `gorm:"type:uuid;not null;index"`
 	StudentID      uuid.UUID `gorm:"type:uuid;not null;index"`
 	PhotographPath string    `gorm:"not null"`
@@ -128,15 +128,22 @@ type AiPhotograph struct {
 
 // AiTrainingJob: 学習の「バージョン」を管理
 type AiTrainingJob struct {
-	gorm.Model               // id (bigint) は自動生成される
-	ConfigID       uuid.UUID `gorm:"type:uuid;not null;uniqueIndex:idx_config_status"`
-	Status         string    `gorm:"type:varchar(20);uniqueIndex:idx_config_status"`
-	ModelPath      string    `gorm:"size:255"`
-	AvgSaturation  float64   `gorm:"type:float"`
-	DiversityScore float64   `gorm:"type:float"`
-	Accuracy       float64   `gorm:"type:float"`
-	LearningCurve  string    `gorm:"type:text"`         // 3モデル分の学習履歴JSONが入る
-	ModelZipPath   string    `gorm:"type:varchar(255)"` // 解凍・配置したモデルのパスなど
+	gorm.Model
+	ConfigID  uuid.UUID `gorm:"type:uuid;not null;uniqueIndex:idx_config_version"`
+	Version   int       `gorm:"not null;uniqueIndex:idx_config_version"`
+	Status    string    `gorm:"type:varchar(20);index"`
+	IsCurrent bool      `gorm:"not null;default:false;index"`
+	// AIの統計・評価データ
+	AvgSaturation  float64 `gorm:"type:float"`
+	DiversityScore float64 `gorm:"type:float"`
+	// 修正：3モデル分の最終精度（Accuracy/Loss）をJSONでまとめて入れる
+	// 例: {"mobilenet_v3": {"accuracy": 0.92, "loss": 0.15}, ...}
+	AccuracySummary string `gorm:"type:text"`
+	// 3モデル分の学習履歴（エポックごとの推移）JSON
+	LearningCurve string `gorm:"type:text"`
+	// ファイルパス関連
+	ModelZipPath string `gorm:"type:varchar(255)"` // .keras本体が含まれるオリジナルモデルの保存先
+	WebModelRoot string `gorm:"type:varchar(255)"` // フロント(JS)が読み込む解凍先ディレクトリのパス
 }
 
 // AiTrainingJobSnapshot: どのJobにどの写真が含まれていたかの中間テーブル
@@ -145,4 +152,44 @@ type AiTrainingJobSnapshot struct {
 	AiTrainingJobID uint `gorm:"not null;index"` // どの学習バージョンか
 	PhotographID    uint `gorm:"not null"`       // どの写真か
 	LabelID         int  `gorm:"not null"`       // その時点でのラベル番号
+}
+
+type TestImage struct {
+	gorm.Model
+	CourseID         uint      `gorm:"not null;index;"`                   // どのクラス（プロジェクト）のデータセットか
+	BatchID          uuid.UUID `gorm:"not null;type:varchar(191);index;"` //編集や送信時の識別
+	ImageURL         string    `gorm:"not null;type:text"`                // 画像の配信URL/パス
+	CorrectLabelName string    `gorm:"not null;type:varchar(50);index"`   // 先生が追加・選択したラベル名
+}
+
+// StudentTestMapping: 先生のラベルと生徒のラベルの対応表（中間テーブル）
+type StudentTestMapping struct {
+	gorm.Model
+	ProjectUUID      uuid.UUID `gorm:"type:uuid;not null;uniqueIndex:idx_project_student"` // どの生徒のプロジェクトか
+	CourseID         uint      `gorm:"not null;index;"`                                    // クラスID
+	TeacherLabelName string    `gorm:"not null"`                                           // 先生側のラベル名（本殿）
+	StudentLabelName string    `gorm:"not null;uniqueIndex:idx_project_student"`           // 生徒側のラベル名（本）
+}
+
+// StudentTestResultSnapshot: 生徒の性能テスト結果の履歴中間テーブル
+type StudentTestResultSnapshot struct {
+	gorm.Model
+	StudentTestJobID uint    `gorm:"not null;index"`      // どのテスト実行セッション（Job）か
+	TestImageID      uint    `gorm:"not null"`            // どのテスト画像か（TestImage.ID）
+	PredictedLabelID int     `gorm:"not null"`            // 生徒のAIが出した予測ラベルID（例: 3）
+	Confidence       float64 `gorm:"not null;type:float"` // 確信度（例: 0.92）
+	IsCorrect        bool    `gorm:"not null"`            // マッピングを基準にした正誤（true/false）
+}
+
+// StudentTestJob: テスト実行全体のステータスやサマリーを管理する親テーブル
+type StudentTestJob struct {
+	gorm.Model
+	UserID        uuid.UUID `gorm:"type:uuid;not null;index"`
+	TrainingJobID uint      `gorm:"not null;index"` // どのAIモデル（学習バージョン）を使ったか
+	//  "pending" (準備中), "running" (Pythonで推論中), "success" (完了), "failed" (エラー)
+	Status string `gorm:"type:varchar(20);not null;default:'pending';index"`
+	// 全体での正解率（例: 0.85 ➔ 85%正解）。子テーブルを集計してここに表示
+	TotalAccuracy float64 `gorm:"type:float;not null;default:0.0"`
+	//　実行時エラーの理由などを残せるように
+	ErrorMessage string `gorm:"type:text"`
 }

@@ -6,6 +6,7 @@ import (
 	"ai-education/backend/internal/service"
 	"ai-education/backend/internal/utils"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -66,14 +67,16 @@ func (h *Handler) AiCard(c *gin.Context) {
 }
 
 func (h *Handler) AiCreation(c *gin.Context) {
+	jst, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		// 万が一ロケーションの読み込みに失敗した場合は、固定で9時間進める（FixedZone）
+		jst = time.FixedZone("Asia/Tokyo", 9*60*60)
+	}
 	isTeacher, ok := utils.GetUserTeacher(c)
 	userId, ok1 := utils.GetUserID(c)
 	if !ok || !ok1 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "認証情報の取得または型変換に失敗しました"})
 		return
-	}
-	if isTeacher == false {
-
 	}
 	var req struct {
 		ProjectId uuid.UUID `json:"project_id" binding:"required"`
@@ -82,14 +85,28 @@ func (h *Handler) AiCreation(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "プロジェクトIDが必要です"})
 		return
 	}
-	aicreation, err := service.AICreation(h.DB, userId, isTeacher, req.ProjectId)
+	createdAt, err := service.AICreation(h.DB, userId, isTeacher, req.ProjectId)
 
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Aiが有りません"})
+	// 【すでに作成中のケース】時間が返ってきている場合
+	if !createdAt.IsZero() {
+		createdAtJST := createdAt.In(jst)
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "すでにAIを作成中です。",
+			"time":  createdAtJST.Format("2006-01-02 15:04"),
+		})
 		return
 	}
+
+	//【本当にエラーが起きたケース】err が nil でない場合
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	//【正常終了のケース】エラーもなく、重複もない場合
 	c.JSON(http.StatusOK, gin.H{
-		"aicreation": aicreation,
+		"message":    "AIの作成処理を開始しました。",
+		"aicreation": createdAt,
 	})
 
 }

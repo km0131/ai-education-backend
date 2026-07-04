@@ -142,20 +142,47 @@ func CreateTrainingJobWithSnapshot(database *gorm.DB, configID uuid.UUID) (*mode
 
 	// 1. 最初から INSERT (OnConflict: DoNothing) を試みる
 	var job model.AiTrainingJob
-	err := tx.Where(
-		"config_id = ? AND status = ?",
-		configID,
-		"pending",
-	).First(&job).Error
+	err := tx.
+		Where("config_id = ?", configID).
+		Order("version DESC").
+		First(&job).Error
 
 	if err != nil {
 		tx.Rollback()
-
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, fmt.Errorf("pending training job not found")
 		}
-
 		return nil, err
+	}
+	switch job.Status {
+
+	case "pending":
+
+	case "production":
+		if err := tx.Model(&model.AiTrainingJob{}).
+			Where("config_id = ? AND is_current = ?", configID, true).
+			Update("is_current", false).Error; err != nil {
+			tx.Rollback()
+			return nil, err
+		}
+		// Versionを1つ増やして新しいJobを作成
+		newJob := model.AiTrainingJob{
+			ConfigID:  configID,
+			Version:   job.Version + 1,
+			Status:    "pending",
+			IsCurrent: true,
+		}
+
+		if err := tx.Create(&newJob).Error; err != nil {
+			tx.Rollback()
+			return nil, err
+		}
+		// 以降の処理は新しいJobを使う
+		job = newJob
+
+	default:
+		tx.Rollback()
+		return nil, fmt.Errorf("unsupported status: %s", job.Status)
 	}
 
 	fmt.Printf("[Debug] Job(ID:%d)へスナップショットを追加します。\n", job.ID)
@@ -230,7 +257,7 @@ func AiSearchDB(database *gorm.DB, courseID uint) ([]model.AiCard, error) {
 			displayName = strings.Split(displayName, "-")[0]
 		}
 		var status model.AiTrainingJob
-		err = database.Where("config_id = ?", config[i].ProjectUUID).First(&status).Error
+		err = database.Where("config_id = ? AND is_current = ?", config[i].ProjectUUID, true).First(&status).Error
 		if err != nil {
 			continue
 		}
@@ -240,6 +267,7 @@ func AiSearchDB(database *gorm.DB, courseID uint) ([]model.AiCard, error) {
 			StudentName: displayName,
 			Status:      status.Status,
 			UpdatedAt:   config[i].UpdatedAt,
+			Version:     status.Version,
 		}
 		cards = append(cards, card)
 	}
@@ -298,7 +326,7 @@ func AIGenerationStatus(database *gorm.DB, projectID uuid.UUID) (bool, time.Time
 	var latestJob model.AiTrainingJob
 
 	// config_id で絞り込み、一番新しく作られた Job を1件だけ取得する
-	err := database.Where("config_id = ?", projectID).Order("created_at DESC").First(&latestJob).Error
+	err := database.Where("config_id = ? AND is_current = ?", projectID, true).Order("created_at DESC").First(&latestJob).Error
 
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -403,14 +431,16 @@ func CreateTrainingJob(database *gorm.DB, configID uuid.UUID) error {
 	}()
 
 	job := &model.AiTrainingJob{
-		ConfigID: configID,
-		Status:   "pending",
+		ConfigID:  configID,
+		Version:   1,
+		Status:    "pending",
+		IsCurrent: true,
 	}
 
 	result := tx.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
 			{Name: "config_id"},
-			{Name: "status"},
+			{Name: "version"},
 		},
 		DoNothing: true,
 	}).Create(job)
@@ -423,9 +453,9 @@ func CreateTrainingJob(database *gorm.DB, configID uuid.UUID) error {
 	// 既に誰かが作っていた
 	if result.RowsAffected == 0 {
 		err := tx.Where(
-			"config_id = ? AND status = ?",
+			"config_id = ? AND version  = ?",
 			configID,
-			"pending",
+			1,
 		).First(job).Error
 
 		if err != nil {

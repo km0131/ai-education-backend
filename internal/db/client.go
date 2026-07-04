@@ -77,6 +77,11 @@ func Migrate() error {
 		// AI学習と推論
 		&model.AiTrainingJob{}, // 紐付き(ConfigID)
 		&model.AiTrainingJobSnapshot{},
+		// AIテスト用
+		&model.TestImage{},
+		&model.StudentTestMapping{},
+		&model.StudentTestResultSnapshot{},
+		&model.StudentTestJob{},
 	}
 
 	// まとめて実行

@@ -79,7 +79,7 @@ func CallPythonAnalysisAPI(photoID uint, path string) (*model.AnalysisData, erro
 // SendTrainingZipToGCP は作成したZIPファイルをGCP上のPython /process APIへ送信します
 func SendTrainingZipToGCP(jobID uint, zipPath string) error {
 	// 1. 環境変数からGCPのAPI URLを取得（なければローカルをデフォルトに）
-	apiURL := os.Getenv("GCP_AI_TRAINING_URL")
+	apiURL := os.Getenv("AI_TRAINING_URL")
 	if apiURL == "" {
 		apiURL = "http://localhost:8000/process" // GCPインスタンスのFastAPIポートに合わせて調整してください
 	}
@@ -133,10 +133,8 @@ func SendTrainingZipToGCP(jobID uint, zipPath string) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+pythonSecret)
 
-	resp, err := client.Do(req)
-
 	log.Printf("[INFO] GCPのAIサーバーへZIPを送信中... URL: %s", apiURL)
-	resp, err = client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send request to GCP: %w", err)
 	}

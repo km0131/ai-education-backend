@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"ai-education/backend/internal/db"
 	"ai-education/backend/internal/model"
 	"archive/zip"
 	"fmt"
@@ -11,13 +12,11 @@ import (
 	"path/filepath"
 
 	"github.com/gin-gonic/gin"
-	"gorm.io/gorm"
 )
 
 // HandleModelReady は GCP からのモデル完了通知を受け取る
 func HandleModelReady(c *gin.Context) {
-	// データベース接続の取得（環境に合わせて調整してください）
-	db := c.MustGet("db").(*gorm.DB)
+	database := db.DB
 
 	// フォームテキストデータのバインド (c.ShouldBind で multipart も対応)
 	var input model.ModelReadyInput
@@ -38,18 +37,19 @@ func HandleModelReady(c *gin.Context) {
 	// ZIPファイルを一時保存してから解凍するディレクトリを決定
 	// 将来フロント（WebGPU / Transformers.js）がロードしやすい配置にします
 	targetDir := fmt.Sprintf("./storage/models/%d", input.JobID)
+	zipStorageDir := "./storage/zips"
 	_ = os.MkdirAll(targetDir, os.ModePerm)
+	_ = os.MkdirAll(zipStorageDir, os.ModePerm)
 
-	tempZipPath := filepath.Join(os.TempDir(), fileHeader.Filename)
-	if err := c.SaveUploadedFile(fileHeader, tempZipPath); err != nil {
-		log.Printf("[ERROR] ZIPの一時保存失敗: %v", err)
+	savedZipPath := filepath.Join(zipStorageDir, fmt.Sprintf("%d.zip", input.JobID))
+	if err := c.SaveUploadedFile(fileHeader, savedZipPath); err != nil {
+		log.Printf("[ERROR] ZIPの保存失敗: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "ファイルの保存に失敗しました"})
 		return
 	}
-	defer os.Remove(tempZipPath) // 処理が終わったら一時ZIPは消去
 
 	// ZIPファイルを targetDir に解凍 (3つのモデルのフォルダが展開される)
-	if err := unzip(tempZipPath, targetDir); err != nil {
+	if err := unzip(savedZipPath, targetDir); err != nil {
 		log.Printf("[ERROR] ZIPの解凍失敗: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "モデルデータの展開に失敗しました"})
 		return
@@ -57,7 +57,7 @@ func HandleModelReady(c *gin.Context) {
 
 	// DB上の該当ジョブを検索
 	var job model.AiTrainingJob
-	if err := db.First(&job, input.JobID).Error; err != nil {
+	if err := database.First(&job, input.JobID).Error; err != nil {
 		log.Printf("[ERROR] 指定されたJobIDが見つかりません: %d", input.JobID)
 		c.JSON(http.StatusNotFound, gin.H{"error": "該当する学習ジョブが存在しません"})
 		return
@@ -66,17 +66,17 @@ func HandleModelReady(c *gin.Context) {
 	// 値の更新データをマップで作成
 	// ※ 構造体だと 0.0 の値が省略されてしまうため、map[string]interface{} を使います
 	updates := map[string]interface{}{
-		"status":          "production", // ステータスを「本番利用可能」に
-		"avg_saturation":  input.AvgSaturation,
-		"diversity_score": input.DiversityScore,
-		"accuracy":        input.Accuracy,
-		"loss":            input.Loss,
-		"learning_curve":  input.LearningCurve, // 3モデル分の履歴が入ったJSON文字列
-		"model_zip_path":  targetDir,
+		"status":           "production", // ステータスを「本番利用可能」に
+		"avg_saturation":   input.AvgSaturation,
+		"diversity_score":  input.DiversityScore,
+		"accuracy_summary": input.Accuracy,
+		"learning_curve":   input.LearningCurve, // 3モデル分の履歴が入ったJSON文字列
+		"model_zip_path":   savedZipPath,        // 将来のテスト用に、確定したZIPパスを記録
+		"web_model_root":   targetDir,           // 新設カラム（解凍先ルート）
 	}
 
 	// 8. DBをアップデート
-	if err := db.Model(&job).Updates(updates).Error; err != nil {
+	if err := database.Model(&job).Updates(updates).Error; err != nil {
 		log.Printf("[ERROR] DBの更新失敗: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "データベースの更新に失敗しました"})
 		return
