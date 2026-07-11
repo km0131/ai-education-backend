@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -473,4 +475,78 @@ func CreateTrainingJob(database *gorm.DB, configID uuid.UUID) error {
 	}
 
 	return nil
+}
+
+type AiModelWithLabels struct {
+	Models AvailableModels `json:"models"`
+	Labels []LabelInfo     `json:"labels"`
+}
+
+type AvailableModels struct {
+	MobileNetV3       string `json:"mobilenet_v3"`
+	EfficientNetLite4 string `json:"efficientnet_lite4"`
+	MobileViTV2       string `json:"mobilevit_v2"`
+}
+
+type LabelInfo struct {
+	CategoryIndex int    `json:"category_index"`
+	Title         string `json:"title"`
+}
+
+func AiModelDB(database *gorm.DB, projectID uuid.UUID) (*AiModelWithLabels, error) {
+	var modeldb model.AiTrainingJob
+	err := database.Where("config_id = ? AND is_current = ?", projectID, true).First(&modeldb).Error
+	if err != nil {
+		log.Println(err)
+		return nil, err
+	}
+
+	var rawLabels []model.AiCategory
+	err = database.Where("config_id = ?", projectID).Find(&rawLabels).Error
+	if err != nil {
+		log.Println(err)
+		return nil, err
+	}
+
+	uniqueMap := make(map[int]model.AiCategory)
+	for _, l := range rawLabels {
+		if _, exists := uniqueMap[l.CategoryIndex]; !exists {
+			uniqueMap[l.CategoryIndex] = l
+		}
+	}
+	labelInfos := make([]LabelInfo, 0, len(uniqueMap))
+	for _, l := range uniqueMap {
+		labelInfos = append(labelInfos, LabelInfo{CategoryIndex: l.CategoryIndex, Title: l.Title})
+	}
+	sort.Slice(labelInfos, func(i, j int) bool {
+		return labelInfos[i].CategoryIndex < labelInfos[j].CategoryIndex
+	})
+
+	// API_URL と同じ値を環境変数から取得（フロントの API_URL と揃えること）
+	apiBaseURL := os.Getenv("API_URL")
+
+	// WebModelRoot（例: "./storage/models/38"）を、フロントから公開URLとして
+	// アクセスできる形に変換する
+	models := toPublicURL(modeldb.WebModelRoot, apiBaseURL)
+
+	return &AiModelWithLabels{
+		Models: models,
+		Labels: labelInfos,
+	}, nil
+}
+
+func toPublicURL(webModelRoot string, apiBaseURL string) AvailableModels {
+	// "./storage/models/38" → "38"
+	trimmed := strings.TrimPrefix(webModelRoot, "./storage/models")
+	trimmed = strings.Trim(trimmed, "/")
+
+	base := fmt.Sprintf("%s/models/%s", strings.TrimRight(apiBaseURL, "/"), trimmed)
+
+	// 3モデルとも .tflite へ移行済み(LiteRT.jsから呼び出す)。フロントはtfjsを使わず、
+	// 常にLiteRT.js経由でロードする。.keras/.ptは変換前の元モデル(アーカイブ用)としてのみ保持する。
+	return AvailableModels{
+		MobileNetV3:       base + "/mobilenet_v3/model.tflite",
+		EfficientNetLite4: base + "/efficientnet_lite4/model.tflite",
+		MobileViTV2:       base + "/mobilevit_v2/model.tflite",
+	}
 }

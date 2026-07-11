@@ -82,6 +82,8 @@ func Migrate() error {
 		&model.StudentTestMapping{},
 		&model.StudentTestResultSnapshot{},
 		&model.StudentTestJob{},
+		&model.StudentTestJobModel{},
+		&model.StudentTestResultSnapshot{},
 	}
 
 	// まとめて実行

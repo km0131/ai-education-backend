@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/goccy/go-json"
 	"github.com/google/uuid"
@@ -39,18 +40,16 @@ func TestExecutionWorker(data *gorm.DB, status int, projectID uuid.UUID, courseI
 	zipWriter := zip.NewWriter(zipFile)
 	defer zipWriter.Close()
 	// ---------------------------------------------------------
-	// テスト画像群をZIPに書き込む & JSON用のエントリを作成
+	// テスト画像群をZIPに書き込む & 結果エントリの雛形を作成（全モデル共通）
 	// ---------------------------------------------------------
-	var resultList []model.TestResultEntry
+	var baseResultList []model.TestResultEntry
 	for _, img := range image {
-		// ※ img.Path は実際のローカル環境のファイルパスを指していると仮定
 		srcFile, err := os.Open(img.ImageURL)
 		if err != nil {
 			log.Printf("[WARN] テスト画像が開けません(スキップ): %s, err: %v", img.ImageURL, err)
 			continue
 		}
 
-		// ZIP内での画像配置パス (例: images/test_0.jpg)
 		ext := filepath.Ext(img.ImageURL)
 		zipInnerFilename := fmt.Sprintf("images/test_%d%s", img.ID, ext)
 
@@ -59,70 +58,95 @@ func TestExecutionWorker(data *gorm.DB, status int, projectID uuid.UUID, courseI
 			srcFile.Close()
 			return "", fmt.Errorf("failed to create zip entry for image %s: %w", zipInnerFilename, err)
 		}
-
 		if _, err := io.Copy(writer, srcFile); err != nil {
 			srcFile.Close()
 			return "", fmt.Errorf("failed to write image to zip: %w", err)
 		}
 		srcFile.Close()
 
-		// 結果JSONの雛形を作成 (結果項目は空)
-		resultList = append(resultList, model.TestResultEntry{
+		// 先生の正解ラベル(img.CorrectLabelName)から生徒ラベルID(訓練時のCategoryIndex)へ変換
+		trueLabelID, err := db.ResolveStudentLabelFromTeacherLabel(data, projectID, img.CorrectLabelName)
+		if err != nil {
+			log.Printf("[WARN] ラベルマッピングに失敗(スキップ): image_id=%d, err: %v", img.ID, err)
+			continue
+		}
+
+		baseResultList = append(baseResultList, model.TestResultEntry{
 			ImageID:          img.ID,
 			Filename:         zipInnerFilename,
-			PredictedLabelID: nil, // 空欄
-			Confidence:       0.0, // 空欄
+			TrueLabelID:      trueLabelID,
+			PredictedLabelID: nil,
+			Confidence:       0.0,
 		})
 	}
 
 	// ---------------------------------------------------------
-	// AIモデル（WebModelRoot内の .keras ファイル）をZIPに組み込む
+	// AIモデル（.tfliteファイル）をZIPに組み込み、モデル名一覧を収集
+	// 3モデルとも.tfliteへ移行済み(Pythonの/testエンドポイントがai_edge_litert.Interpreterで評価する)。
+	// .keras/.pt（アーカイブ用の変換前モデル）は評価対象に含めない。
 	// ---------------------------------------------------------
+	const evalModelExt = ".tflite"
+	var modelNames []string
 	if job.WebModelRoot != "" {
-		// WebModelRoot（ディレクトリ）の中にあるファイルをスキャン
 		files, err := os.ReadDir(job.WebModelRoot)
 		if err != nil {
 			log.Printf("[WARN] モデルディレクトリの読み込みに失敗しました: %s, err: %v", job.WebModelRoot, err)
 		} else {
-			modelCount := 0
 			for _, file := range files {
-				// ディレクトリではなく、かつ拡張子が ".keras" のファイルだけを狙い撃ち
-				if !file.IsDir() && filepath.Ext(file.Name()) == ".keras" {
+				if !file.IsDir() && filepath.Ext(file.Name()) == evalModelExt {
 					srcPath := filepath.Join(job.WebModelRoot, file.Name())
-
 					modelFile, err := os.Open(srcPath)
 					if err != nil {
 						log.Printf("[WARN] モデルファイルが開けません(スキップ): %s, err: %v", srcPath, err)
 						continue
 					}
-					// ZIP内での配置パスを設定 (例: models/mobilenet_v3.keras)
 					zipInnerModelPath := filepath.Join("models", file.Name())
 					writer, err := zipWriter.Create(zipInnerModelPath)
 					if err != nil {
 						modelFile.Close()
 						return "", fmt.Errorf("failed to create zip entry for model %s: %w", zipInnerModelPath, err)
 					}
-					// ストリームコピーでZIPに書き込み
 					if _, err := io.Copy(writer, modelFile); err != nil {
 						modelFile.Close()
 						return "", fmt.Errorf("failed to write model file to zip: %w", err)
 					}
 					modelFile.Close()
-					modelCount++
+
+					modelName := strings.TrimSuffix(file.Name(), evalModelExt) // ← モデル名をファイル名から抽出
+					modelNames = append(modelNames, modelName)
 				}
 			}
-			log.Printf("[INFO] %d 個の .keras モデルファイルをZIPに同梱しました", modelCount)
+			log.Printf("[INFO] %d 個の.tfliteモデルファイルをZIPに同梱しました", len(modelNames))
 		}
 	} else {
 		log.Printf("[WARN] WebModelRoot が空のため、モデルの同梱をスキップしました")
 	}
+	// ラベル
+	labelMapSrc := filepath.Join(job.WebModelRoot, "label_map.json")
+	if _, err := os.Stat(labelMapSrc); err == nil {
+		labelMapFile, err := os.Open(labelMapSrc)
+		if err == nil {
+			writer, err := zipWriter.Create("models/label_map.json")
+			if err == nil {
+				io.Copy(writer, labelMapFile)
+			}
+			labelMapFile.Close()
+		}
+	} else {
+		log.Printf("[WARN] label_map.json が見つかりません: %s", labelMapSrc)
+	}
 
 	// ---------------------------------------------------------
-	// 結果を記録するための雛形 JSON を作成して同梱
+	// itinerary: モデル名ごとに同じ画像リストを割り当てる
 	// ---------------------------------------------------------
+	modelsMap := make(map[string][]model.TestResultEntry, len(modelNames))
+	for _, name := range modelNames {
+		modelsMap[name] = baseResultList // 読み取り専用として使うので共有スライスでOK
+	}
+
 	itinerary := model.TestItinerary{
-		StatusID: status, // 引数で受け取っているstatusIDをキャストしてセット
-		Results:  resultList,
+		StudentTestJobID: job.ID, // ← 実際のStudentTestJobのIDに置き換えてください
+		Models:           modelsMap,
 	}
 
 	// itinerary を丸ごと JSON に変換する

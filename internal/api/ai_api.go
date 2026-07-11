@@ -119,7 +119,7 @@ func SendTrainingZipToGCP(jobID uint, zipPath string) error {
 
 	// リクエストの送信
 	// 🌟 重要: AI学習の通信と処理には時間がかかるため、タイムアウトを30分に設定
-	client := &http.Client{Timeout: 30 * time.Minute}
+	client := &http.Client{Timeout: 5 * time.Minute}
 	req, err := http.NewRequest("POST", apiURL, body)
 	if err != nil {
 		return fmt.Errorf("failed to create http request: %w", err)
@@ -140,11 +140,10 @@ func SendTrainingZipToGCP(jobID uint, zipPath string) error {
 	}
 	defer resp.Body.Close()
 
-	// ステータスチェック
-	if resp.StatusCode != http.StatusOK {
-		// エラー内容がわかるようにボディを少し読み出す
+	// ★202 Acceptedのみ許容。学習完了は待たない
+	if resp.StatusCode != http.StatusAccepted {
 		errorBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("gcp api error: status %d, body: %s", resp.StatusCode, string(errorBody))
+		return fmt.Errorf("python train api error: status %d, body: %s", resp.StatusCode, string(errorBody))
 	}
 
 	log.Printf("[INFO] GCPへのZIP送信およびAI作成リクエストが正常に受け付けられました（JobID: %d）", jobID)

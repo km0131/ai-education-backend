@@ -39,8 +39,7 @@ func main() {
 	db.InitDB()
 	db.Migrate()
 
-	worker.StartAnalysisWorker(db.DB)
-	worker.StartTrainWorker(db.DB)
+	worker.StartGPUWorker(db.DB)
 
 	r := gin.Default()
 
@@ -60,7 +59,9 @@ func main() {
 	r.GET("/images/certification/*filename", h.PostPasswordImage)
 	r.GET("/images/ai_photogrph/*filename", h.GetAiPhotographImage)
 	r.GET("/images/test_photogrph/*filename", h.GetTestImage)
+	r.GET("/storage/models/*filename", h.GetModelFile)
 	r.POST("/api/callback/model_ready", utils.MachineToMachineAuth(), controller.HandleModelReady)
+	r.POST("/api/callback/test_result", utils.MachineToMachineAuth(), controller.HandleTestReady)
 
 	v0 := r.Group("/api/v0")
 	{
@@ -96,6 +97,7 @@ func main() {
 				aiGroup.POST("/image_updated", h.ImageUpdated)
 				aiGroup.POST("/delete_image", h.DeleteImage)
 				aiGroup.POST("/up_label", h.UpLabel)
+				aiGroup.POST("/ai_model", h.AiModel)
 			}
 			testGroup := authGroup.Group("/test")
 			testGroup.Use(utils.AuthMiddleware(h.DB))
@@ -108,6 +110,15 @@ func main() {
 				testGroup.POST("/get_test_label_map", h.GetTestLabelMap)
 				testGroup.POST("/up_test_label_map", h.UpStudentTestLabel)
 				testGroup.POST("/execution", h.TestExecution)
+			}
+			resultGroup := authGroup.Group("/result")
+			resultGroup.Use(utils.AuthMiddleware(h.DB))
+			{
+				resultGroup.POST("/training_curve", h.TrainingCurve)
+				resultGroup.POST("/test_results", h.TestResults)
+				resultGroup.POST("/test_results_imge", h.TestResultsImge)
+				resultGroup.POST("/image_evaluation_get", h.ImageEvaluationGet)
+
 			}
 		}
 	}

@@ -85,7 +85,11 @@ func SaveAndAnalyze(database *gorm.DB, userID uuid.UUID, rot model.ImageUploadRe
 	}
 
 	// 画像評価キューに登録
-	worker.AnalysisQueue <- photo.ID
+	worker.Scheduler.Enqueue(&worker.GPUJobRequest{
+		Kind:     worker.JobKindAnalysis,
+		Priority: worker.PriorityAnalysis,
+		PhotoID:  photo.ID,
+	})
 
 	// AIカート作成
 
@@ -128,8 +132,12 @@ func AICreation(database *gorm.DB, userId uuid.UUID, teacher bool, projectId uui
 		log.Printf("[ERROR] 学習ジョブの作成に失敗: %v", err)
 		return time.Time{}, fmt.Errorf("学習データのまとめ処理に失敗しました: %w", err)
 	}
-	// AI作成キューへJob IDを投入
-	worker.TrainJobQueue <- trainingJob.ID
+	// AI作成キューへJob IDを投入（GPUは1系統のためテスト・分析と同じスケジューラで直列化する）
+	worker.Scheduler.Enqueue(&worker.GPUJobRequest{
+		Kind:     worker.JobKindTrain,
+		Priority: worker.PriorityTrain,
+		JobID:    trainingJob.ID,
+	})
 
 	log.Printf("[INFO] AI作成ジョブをキューに登録しました。JobID: %d", trainingJob.ID)
 	return time.Time{}, nil

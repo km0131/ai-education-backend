@@ -69,32 +69,41 @@ func CreatingTestDataset(data *gorm.DB, res model.ImageUploadResponse, file *mul
 	return nil
 }
 
-func TestExecutionService(data *gorm.DB, projectId uuid.UUID, courseID uint, isTeacher bool, userId uuid.UUID) (*time.Time, error) {
+func TestExecutionService(data *gorm.DB, projectId uuid.UUID, courseID uint, isTeacher bool, userId uuid.UUID) (time.Time, error) {
 	if isTeacher == false {
 		author, err := db.AuthorCheck(data, userId, projectId)
 		if err != nil {
 			log.Printf("[ERROR] AIテストに失敗しました。: %v", err)
-			return nil, err
+			return time.Time{}, err
 		}
 		if !author {
 			log.Printf("[ERROR] ラベル修正の権限が有りません。: %v", err)
-			return nil, fmt.Errorf("ラベル修正の権限が有りません")
+			return time.Time{}, fmt.Errorf("ラベル修正の権限が有りません")
 		}
 	}
-	status, upTime, err := db.TestStatus(data, projectId, userId)
+	status, upTime, err := db.UpTestStatus(data, projectId, userId)
 	if err != nil {
 		log.Printf("[ERROR] テストステータスの作成に失敗しました。: %v", err)
-		return nil, fmt.Errorf("テストステータスの作成に失敗しました")
+		return time.Time{}, fmt.Errorf("テストステータスの作成に失敗しました")
 	}
 	if upTime != nil {
 		log.Printf("[ERROR] 現在テスト中です。: %v", upTime)
-		return upTime, fmt.Errorf("現在テスト中です")
+		return status.UpdatedAt, fmt.Errorf("現在テスト中です")
 	}
 
-	file, err = worker.TestExecutionWorker(data, status.ID, projectId, courseID)
+	// ZIP作成とPythonへの送信は非同期（GPUスケジューラ経由）で行う
+	worker.Scheduler.Enqueue(&worker.GPUJobRequest{
+		Kind:      worker.JobKindTest,
+		Priority:  worker.PriorityTest,
+		StatusID:  status.ID,
+		ProjectID: projectId,
+		CourseID:  courseID,
+	})
+	err = db.TestStatusDB(data, status.ID)
 	if err != nil {
-		log.Printf("[ERROR] ワーカーの実行に失敗しました。: %v", err)
-		return nil, fmt.Errorf("ワーカーの実行に失敗しました")
+		log.Printf("[ERROR] ステータスをテスト中に変更。: %v", err)
+		return time.Time{}, fmt.Errorf("ステータスをテスト中に変更")
 	}
 
+	return time.Time{}, nil
 }

@@ -250,10 +250,36 @@ func (h *Handler) TestExecution(c *gin.Context) {
 	}
 	testTime, err := service.TestExecutionService(h.DB, req.ProjectUUID, req.CourseID, isTeacher, userId)
 	if err != nil {
-		log.Printf("[Error] ステータスの作成に失敗しました: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "ステータスの作成に失敗しました"})
+		if !testTime.IsZero() {
+			log.Printf("[INFO] 現在テスト実行中です。開始時間: %v", testTime)
+			c.JSON(http.StatusBadRequest, gin.H{
+				"time": testTime,
+			})
+			return
+		} else {
+			log.Printf("[Error] ステータスの作成に失敗しました: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "ステータスの作成に失敗しました"})
+			return
+		}
+	}
+}
+
+func (h *Handler) ImageEvaluationGet(c *gin.Context) {
+	type UpLabel struct {
+		ProjectUUID uuid.UUID `form:"project_uuid" json:"project_uuid"`
+	}
+	var req UpLabel
+	if err := c.ShouldBind(&req); err != nil {
+		log.Printf("[Error] プロジェクトIDのパース失敗: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "無効なリクエストです"})
+		return
+	}
+	summary, err := db.GetImageEvaluationDB(h.DB, req.ProjectUUID)
+	if err != nil {
+		log.Printf("[Error] 画像評価情報の取得失敗: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "画像評価情報の取得に失敗しました"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"time": testTime})
+	c.JSON(http.StatusOK, summary)
 }

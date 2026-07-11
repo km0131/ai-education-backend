@@ -1,6 +1,9 @@
 package model
 
 import (
+	"database/sql/driver"
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -8,6 +11,39 @@ import (
 )
 
 type FloatSlice []float64
+
+// Scan implements sql.Scanner so FloatSlice can be read back from a jsonb column.
+func (f *FloatSlice) Scan(value any) error {
+	if value == nil {
+		*f = nil
+		return nil
+	}
+
+	var bytes []byte
+	switch v := value.(type) {
+	case []byte:
+		bytes = v
+	case string:
+		bytes = []byte(v)
+	default:
+		return fmt.Errorf("unsupported Scan, storing driver.Value type %T into type *model.FloatSlice", value)
+	}
+
+	if len(bytes) == 0 {
+		*f = nil
+		return nil
+	}
+
+	return json.Unmarshal(bytes, f)
+}
+
+// Value implements driver.Valuer so FloatSlice is persisted as jsonb.
+func (f FloatSlice) Value() (driver.Value, error) {
+	if f == nil {
+		return nil, nil
+	}
+	return json.Marshal(f)
+}
 
 // RegistrationTicket は仮登録時に発行するチケットの永続化モデルです。
 type RegistrationTicket struct {
@@ -171,16 +207,6 @@ type StudentTestMapping struct {
 	StudentLabelName string    `gorm:"not null;uniqueIndex:idx_project_student"`           // 生徒側のラベル名（本）
 }
 
-// StudentTestResultSnapshot: 生徒の性能テスト結果の履歴中間テーブル
-type StudentTestResultSnapshot struct {
-	gorm.Model
-	StudentTestJobID uint    `gorm:"not null;index"`      // どのテスト実行セッション（Job）か
-	TestImageID      uint    `gorm:"not null"`            // どのテスト画像か（TestImage.ID）
-	PredictedLabelID int     `gorm:"not null"`            // 生徒のAIが出した予測ラベルID（例: 3）
-	Confidence       float64 `gorm:"not null;type:float"` // 確信度（例: 0.92）
-	IsCorrect        bool    `gorm:"not null"`            // マッピングを基準にした正誤（true/false）
-}
-
 // StudentTestJob: テスト実行全体のステータスやサマリーを管理する親テーブル
 type StudentTestJob struct {
 	gorm.Model
@@ -192,4 +218,28 @@ type StudentTestJob struct {
 	TotalAccuracy float64 `gorm:"type:float;not null;default:0.0"`
 	//　実行時エラーの理由などを残せるように
 	ErrorMessage string `gorm:"type:text"`
+	// 1対多のリレーション定義
+	Models []StudentTestJobModel `gorm:"foreignKey:StudentTestJobID"`
+}
+
+// StudentTestJobModel: 1テストジョブ内で「どのモデルを回したか」＋そのモデルの集計結果
+// グラフ表示（精度推移・モデル間比較）はこのテーブルだけで完結させる想定
+type StudentTestJobModel struct {
+	gorm.Model
+	StudentTestJobID uint    `gorm:"not null;index"`      // どのテスト実行セッション（Job）に属するか
+	ModelName        string  `gorm:"not null;index"`      // モデル名（例: "mobilenet_v3", "resnet50"）※1ジョブに複数モデルがある場合の識別キー
+	Accuracy         float64 `gorm:"not null;type:float"` // このモデルの正解率（グラフ用の集計値）
+	Loss             float64 `gorm:"not null;type:float"` // このモデルのロス値（グラフ用の集計値）
+	TotalImages      int     `gorm:"not null"`            // このモデルでテストした画像枚数
+}
+
+// StudentTestResultSnapshot: 画像単位の生データ（混同行列や間違えた画像の一覧など、詳細分析用）
+// 普段のグラフ表示では触らず、詳細を見たいときだけこちらを参照する
+type StudentTestResultSnapshot struct {
+	gorm.Model
+	StudentTestJobModelID uint    `gorm:"not null;index"`      // どのモデルの実行結果か（StudentTestJobModel.ID を参照）※StudentTestJobIDではなくこちらを参照する点に注意
+	TestImageID           uint    `gorm:"not null"`            // どのテスト画像か（TestImage.ID）
+	PredictedLabelID      int     `gorm:"not null"`            // 生徒のAIが出した予測ラベルID（例: 3）
+	Confidence            float64 `gorm:"not null;type:float"` // 確信度（例: 0.92）
+	IsCorrect             bool    `gorm:"not null"`            // マッピングを基準にした正誤（true/false）
 }

@@ -167,6 +167,26 @@ func GetStudentTestMapping(db *gorm.DB, projectid uuid.UUID) ([]model.StudentTes
 	return testLabel, nil
 }
 
+// ResolveStudentLabelFromTeacherLabel は、TestImageが持つ「先生の正解ラベル」から
+// 生徒のAIモデルが本来出力すべき「生徒ラベルID（訓練時のラベル空間）」を逆引きします
+func ResolveStudentLabelFromTeacherLabel(data *gorm.DB, projectID uuid.UUID, teacherLabel string) (int, error) {
+	// StudentTestMappingを「先生ラベル→生徒ラベル」の向きで検索
+	var mapping model.StudentTestMapping
+	if err := data.Where("project_uuid = ? AND teacher_label_name = ?", projectID, teacherLabel).
+		First(&mapping).Error; err != nil {
+		return 0, fmt.Errorf("failed to find mapping for teacher label %s: %w", teacherLabel, err)
+	}
+
+	// AiCategoryを「生徒ラベル名→ラベルID（CategoryIndex）」の向きで検索
+	var aiCategory model.AiCategory
+	if err := data.Where("config_id = ? AND title = ?", projectID, mapping.StudentLabelName).
+		First(&aiCategory).Error; err != nil {
+		return 0, fmt.Errorf("failed to find ai category for student label %s: %w", mapping.StudentLabelName, err)
+	}
+
+	return aiCategory.CategoryIndex, nil
+}
+
 // 生徒と先生のラベルの中間テーブルをUP
 func UpStudentTestLabelDB(db *gorm.DB, req model.SaveMappingRequest, userID uuid.UUID, teacher bool) error {
 	if teacher == false {
@@ -204,10 +224,10 @@ func UpStudentTestLabelDB(db *gorm.DB, req model.SaveMappingRequest, userID uuid
 }
 
 // テストステータスを確認
-func TestStatus(db *gorm.DB, projectID uuid.UUID, userID uuid.UUID) (*model.StudentTestJob, *time.Time, error) {
+func UpTestStatus(db *gorm.DB, projectID uuid.UUID, userID uuid.UUID) (*model.StudentTestJob, *time.Time, error) {
 	var trainingJob model.AiTrainingJob
 	// projectId (ConfigID) を元に、現在有効なAIモデル（IsCurrent = true）を取得する
-	err := db.Where("config_id = ? AND is_current = ? AND status = ?", projectID, true, "success").
+	err := db.Where("config_id = ? AND is_current = ?", projectID, true).
 		Order("version DESC"). // 万が一のため最新のもの
 		First(&trainingJob).Error
 	if err != nil {
@@ -252,4 +272,274 @@ func GetModelPathsByTrainingJob(db *gorm.DB, trainingJobID uuid.UUID) (*model.Ai
 	var job model.AiTrainingJob
 	err := db.Where("config_id = ? AND is_current = ?", trainingJobID, true).First(&job).Error
 	return &job, err
+}
+
+// テストのステータスをテスト中に変更
+func TestStatusDB(db *gorm.DB, id uint) error {
+	err := db.Model(&model.StudentTestJob{}).Where("id = ?", id).Update("status", "running").Error
+	return err
+}
+
+// SaveTestResultDB はPythonからのテスト結果コールバックを保存します
+// 失敗通知(status != "success")の場合は StudentTestJob を failed にするだけ、
+// 成功時はモデル別集計(StudentTestJobModel)と画像単位のスナップショット(StudentTestResultSnapshot)を作成し、
+// それらを集計して StudentTestJob.TotalAccuracy を更新します
+func SaveTestResultDB(database *gorm.DB, input model.TestResultCallbackInput) error {
+	return database.Transaction(func(tx *gorm.DB) error {
+		var job model.StudentTestJob
+		if err := tx.First(&job, input.StatusID).Error; err != nil {
+			return fmt.Errorf("failed to find student test job (id=%d): %w", input.StatusID, err)
+		}
+
+		if input.Status != "success" {
+			return tx.Model(&job).Updates(map[string]interface{}{
+				"status":        "failed",
+				"error_message": input.Detail,
+			}).Error
+		}
+
+		var totalCorrect, totalImages int
+		for modelName, summary := range input.Summary {
+			jobModel := model.StudentTestJobModel{
+				StudentTestJobID: job.ID,
+				ModelName:        modelName,
+				Accuracy:         summary.Accuracy,
+				Loss:             summary.Loss,
+				TotalImages:      summary.TotalImages,
+			}
+			if err := tx.Create(&jobModel).Error; err != nil {
+				return fmt.Errorf("failed to create test job model (%s): %w", modelName, err)
+			}
+
+			entries := input.Itinerary.Models[modelName]
+			snapshots := make([]model.StudentTestResultSnapshot, 0, len(entries))
+			for _, entry := range entries {
+				if entry.PredictedLabelID == nil {
+					continue
+				}
+				isCorrect := *entry.PredictedLabelID == entry.TrueLabelID
+				snapshots = append(snapshots, model.StudentTestResultSnapshot{
+					StudentTestJobModelID: jobModel.ID,
+					TestImageID:           entry.ImageID,
+					PredictedLabelID:      *entry.PredictedLabelID,
+					Confidence:            entry.Confidence,
+					IsCorrect:             isCorrect,
+				})
+				if isCorrect {
+					totalCorrect++
+				}
+				totalImages++
+			}
+			if len(snapshots) > 0 {
+				if err := tx.Create(&snapshots).Error; err != nil {
+					return fmt.Errorf("failed to create test result snapshots (%s): %w", modelName, err)
+				}
+			}
+		}
+
+		var totalAccuracy float64
+		if totalImages > 0 {
+			totalAccuracy = float64(totalCorrect) / float64(totalImages)
+		}
+
+		return tx.Model(&job).Updates(map[string]interface{}{
+			"status":         "success",
+			"total_accuracy": totalAccuracy,
+		}).Error
+	})
+}
+
+// PhotographEvaluation: 画像1枚分の評価情報
+type PhotographEvaluation struct {
+	PhotographPath  string           `json:"photograph_path"`
+	Saturation      float64          `json:"saturation"`
+	Brightness      float64          `json:"brightness"`
+	Sharpness       float64          `json:"sharpness"`
+	DiversityVector model.FloatSlice `json:"diversity_vector"`
+	IsAnalyzed      bool             `json:"is_analyzed"`
+}
+
+// CategoryEvaluationSummary: ラベル(カテゴリ)単位の平均評価と画像一覧
+type CategoryEvaluationSummary struct {
+	CategoryID             uuid.UUID              `json:"category_id"`
+	CategoryIndex          int                    `json:"category_index"`
+	Title                  string                 `json:"title"`
+	Explanation            string                 `json:"explanation"`
+	AverageSaturation      float64                `json:"average_saturation"`
+	AverageBrightness      float64                `json:"average_brightness"`
+	AverageSharpness       float64                `json:"average_sharpness"`
+	AverageDiversityVector model.FloatSlice       `json:"average_diversity_vector"`
+	PhotographCount        int                    `json:"photograph_count"`
+	Photographs            []PhotographEvaluation `json:"photographs"`
+}
+
+type OverallAverage struct {
+	Saturation             float64          `json:"saturation"`
+	Brightness             float64          `json:"brightness"`
+	Sharpness              float64          `json:"sharpness"`
+	AverageDiversityVector model.FloatSlice `json:"average_diversity_vector"`
+	PhotographCount        int              `json:"photograph_count"`
+}
+
+// averageVectors: 複数のベクトルを要素ごとに平均する（次元は最初の非空ベクトルに合わせる）
+func averageVectors(sum []float64, count int) model.FloatSlice {
+	if len(sum) == 0 || count == 0 {
+		return nil
+	}
+	avg := make(model.FloatSlice, len(sum))
+	for i, v := range sum {
+		avg[i] = v / float64(count)
+	}
+	return avg
+}
+
+// addVector: dst に src を要素ごとに加算する（dst が未初期化なら src の長さで確保する）
+func addVector(dst []float64, src model.FloatSlice) []float64 {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = make([]float64, len(src))
+	}
+	for i, v := range src {
+		if i < len(dst) {
+			dst[i] += v
+		}
+	}
+	return dst
+}
+
+// ImageEvaluationSummary: プロジェクト全体の評価サマリー
+type ImageEvaluationSummary struct {
+	ProjectID      uuid.UUID                   `json:"project_id"`
+	JobID          uint                        `json:"job_id"`
+	JobStatus      string                      `json:"job_status"`
+	OverallAverage OverallAverage              `json:"overall_average"`
+	Categories     []CategoryEvaluationSummary `json:"categories"`
+}
+
+// GetImageEvaluationDB: projectID に紐づく画像評価をラベル別・全体でまとめて取得する
+func GetImageEvaluationDB(database *gorm.DB, projectID uuid.UUID) (*ImageEvaluationSummary, error) {
+	var categories []model.AiCategory
+
+	err := database.
+		Preload("Photographs").
+		Where("config_id = ?", projectID).
+		Order("created_at asc").
+		Find(&categories).Error
+	if err != nil {
+		return nil, fmt.Errorf("画像評価情報の取得に失敗しました: %w", err)
+	}
+
+	// アップロードのたびに履歴として新しい AiCategory 行が作られる（CreateCategoryWithHistory）ため、
+	// 同じタイトルのラベルが複数行に分かれている。タイトルごとに1つのグループへまとめる。
+	type titleGroup struct {
+		categoryID    uuid.UUID
+		categoryIndex int
+		explanation   string
+		photographs   []model.AiPhotograph
+	}
+	groups := make(map[string]*titleGroup)
+	titleOrder := make([]string, 0)
+
+	for _, category := range categories {
+		g, ok := groups[category.Title]
+		if !ok {
+			g = &titleGroup{}
+			groups[category.Title] = g
+			titleOrder = append(titleOrder, category.Title)
+		}
+		// created_at 昇順で読んでいるので、後から出てくるものほど最新の情報になる
+		g.categoryID = category.CategoryID
+		g.categoryIndex = category.CategoryIndex
+		g.explanation = category.Explanation
+		g.photographs = append(g.photographs, category.Photographs...)
+	}
+
+	var job model.AiTrainingJob
+	err = database.
+		Where("config_id = ? AND is_current = ?", projectID, true).
+		First(&job).Error
+	if err != nil {
+		return nil, fmt.Errorf("JOB画像評価情報の取得に失敗しました: %w", err)
+	}
+
+	summary := &ImageEvaluationSummary{
+		ProjectID: projectID,
+		JobID:     job.ID,
+		// JobStatus:  job.Status, // ※ AiTrainingJob の実フィールド名に合わせて調整
+		Categories: make([]CategoryEvaluationSummary, 0, len(titleOrder)),
+	}
+
+	var (
+		totalSaturation   float64
+		totalBrightness   float64
+		totalSharpness    float64
+		totalDiversitySum []float64
+		totalCount        int
+	)
+
+	for _, title := range titleOrder {
+		g := groups[title]
+		catSummary := CategoryEvaluationSummary{
+			CategoryID:      g.categoryID,
+			CategoryIndex:   g.categoryIndex,
+			Title:           title,
+			Explanation:     g.explanation,
+			Photographs:     make([]PhotographEvaluation, 0, len(g.photographs)),
+			PhotographCount: len(g.photographs),
+		}
+
+		var (
+			catSaturation   float64
+			catBrightness   float64
+			catSharpness    float64
+			catDiversitySum []float64
+		)
+
+		for _, photo := range g.photographs {
+			catSummary.Photographs = append(catSummary.Photographs, PhotographEvaluation{
+				PhotographPath:  photo.PhotographPath,
+				Saturation:      photo.Saturation,
+				Brightness:      photo.Brightness,
+				Sharpness:       photo.Sharpness,
+				DiversityVector: photo.DiversityVector,
+				IsAnalyzed:      photo.IsAnalyzed,
+			})
+
+			catSaturation += photo.Saturation
+			catBrightness += photo.Brightness
+			catSharpness += photo.Sharpness
+			catDiversitySum = addVector(catDiversitySum, photo.DiversityVector)
+		}
+
+		if catSummary.PhotographCount > 0 {
+			n := float64(catSummary.PhotographCount)
+			catSummary.AverageSaturation = catSaturation / n
+			catSummary.AverageBrightness = catBrightness / n
+			catSummary.AverageSharpness = catSharpness / n
+			catSummary.AverageDiversityVector = averageVectors(catDiversitySum, catSummary.PhotographCount)
+		}
+
+		totalSaturation += catSaturation
+		totalBrightness += catBrightness
+		totalSharpness += catSharpness
+		totalDiversitySum = addVector(totalDiversitySum, model.FloatSlice(catDiversitySum))
+		totalCount += catSummary.PhotographCount
+
+		summary.Categories = append(summary.Categories, catSummary)
+	}
+
+	if totalCount > 0 {
+		n := float64(totalCount)
+		summary.OverallAverage = OverallAverage{
+			Saturation:             totalSaturation / n,
+			Brightness:             totalBrightness / n,
+			Sharpness:              totalSharpness / n,
+			AverageDiversityVector: averageVectors(totalDiversitySum, totalCount),
+			PhotographCount:        totalCount,
+		}
+	}
+
+	return summary, nil
 }

@@ -149,16 +149,48 @@ type MappingResponse struct {
 	TeacherLabelName string `json:"teacher_label_name"`
 }
 
-// Pythonの推論コードが読み込む、結果記録用のJSONエントリ
+// TestItinerary: テスト実行1回分の記録。モデル名 → 画像結果リストのマップ
+type TestItinerary struct {
+	StudentTestJobID uint                         `json:"student_test_job_id"`
+	Models           map[string][]TestResultEntry `json:"models"`
+}
+
 type TestResultEntry struct {
 	ImageID          uint    `json:"image_id"`
 	Filename         string  `json:"filename"`
-	PredictedLabelID *int    `json:"predicted_label_id"` // 💡 Pythonに書き込んでもらうため初期値はnil
-	Confidence       float64 `json:"confidence"`         // 💡 初期値 0.0
+	TrueLabelID      int     `json:"true_label_id"`      // 正解ラベル（evaluate用）
+	PredictedLabelID *int    `json:"predicted_label_id"` // Pythonが埋める（初期はnil）
+	Confidence       float64 `json:"confidence"`         // Pythonが埋める（初期は0）
 }
 
-// TestItinerary: test_itinerary.json 全体の構造
-type TestItinerary struct {
-	StatusID int               `json:"status_id"` // 💡 ここにStudentTestJobのIDを入れる
-	Results  []TestResultEntry `json:"results"`   // 画像ごとのリスト
+// TestModelSummary: Pythonが算出したモデルごとの集計結果
+type TestModelSummary struct {
+	Accuracy    float64 `json:"accuracy"`
+	Loss        float64 `json:"loss"`
+	TotalImages int     `json:"total_images"`
+}
+
+// TestResultCallbackInput: PythonからのテストResultコールバック（/api/callback/test_result）のボディ
+// 成功時は Summary/Itinerary が入り、失敗時は Detail にエラー内容が入る
+type TestResultCallbackInput struct {
+	Status    string                      `json:"status" binding:"required"` // "success" or "error"
+	StatusID  uint                        `json:"status_id" binding:"required"`
+	Summary   map[string]TestModelSummary `json:"summary"`
+	Itinerary TestItinerary               `json:"itinerary"`
+	Detail    string                      `json:"detail"`
+}
+
+// PythonTestResultCallback はテスト実行結果を受け取るペイロード
+type PythonTestResultCallback struct {
+	Status   string `json:"status" binding:"required"`
+	StatusID uint   `json:"status_id" binding:"required"`
+	Summary  map[string]struct {
+		Accuracy    float64 `json:"accuracy"`
+		Loss        float64 `json:"loss"`
+		TotalImages int     `json:"total_images"`
+	} `json:"summary"`
+	Itinerary struct {
+		Models map[string][]TestResultEntry `json:"models"`
+	} `json:"itinerary"`
+	Detail string `json:"detail"` // エラー時のみ使用
 }

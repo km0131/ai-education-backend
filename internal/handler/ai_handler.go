@@ -5,7 +5,11 @@ import (
 	"ai-education/backend/internal/model"
 	"ai-education/backend/internal/service"
 	"ai-education/backend/internal/utils"
+	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -109,4 +113,58 @@ func (h *Handler) AiCreation(c *gin.Context) {
 		"aicreation": createdAt,
 	})
 
+}
+
+func (h *Handler) AiModel(c *gin.Context) {
+	type trainingCurve struct {
+		ProjectUUID uuid.UUID `form:"project_id" json:"project_id"`
+	}
+	var req trainingCurve
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Printf("[Error] プロジェクトのパース失敗: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "無効なリクエストです"})
+		return
+	}
+	aimodel, err := db.AiModelDB(h.DB, req.ProjectUUID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"aimodel": aimodel,
+	})
+}
+
+// 新しいハンドラー：AI学習済みモデル（tf.js形式）の提供ハンドラー
+func (h *Handler) GetModelFile(c *gin.Context) {
+	// 既存の PostPasswordImage と同じロジックを流用
+
+	filename := c.Param("filename")
+
+	// Ginの仕様上、先頭に「/」が入るため、それを取り除く
+	filename = strings.TrimPrefix(filename, "/")
+
+	// セキュリティ対策: filepath.Clean で「../」などを排除
+	cleanedPath := filepath.Clean(filename)
+
+	// 「../」を使って親ディレクトリに遡ろうとする攻撃だけをブロックする
+	if strings.HasPrefix(cleanedPath, "..") {
+		h.respondError(c, 403, "ファイル取得", "不正なファイルアクセスを検知しました", nil)
+		return
+	}
+
+	// 今回用のコンテナ内の絶対パスをベースにする
+	// /app/storage/models フォルダの中身を探しに行くように設定
+	basePath := "/app/storage/models"
+	fullPath := filepath.Join(basePath, cleanedPath)
+
+	log.Printf("[DEBUG] 検索中のAIモデル絶対パス: %s", fullPath)
+	// ファイルの実在チェック
+	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+		h.respondError(c, 404, "ファイル取得", "AIモデルファイルが見つかりません", err)
+		return
+	}
+	// ファイルが見つかったらGinのStaticFileで配信する
+	c.File(fullPath)
 }

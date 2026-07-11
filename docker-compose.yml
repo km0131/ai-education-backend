@@ -45,6 +45,7 @@ services:
       - PYTHON_ANALYSIS_API_URL=${PYTHON_ANALYSIS_API_URL}
       - AI_TRAINING_URL=${AI_TRAINING_URL}
       - PASETO_KEY=${PASETO_KEY}
+      - PYTHON_TEST_URL=${PYTHON_TEST_URL}
     volumes:
       # ${PWD}/images が存在することを確認してください
       - ./images:/app/images:Z
