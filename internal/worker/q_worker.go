@@ -7,6 +7,7 @@ import (
 	"log"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -149,13 +150,14 @@ func handleTrainJob(database *gorm.DB, job *GPUJobRequest) {
 		return
 	}
 	log.Printf("[TRAIN-WORKER] ステータスをtrainingに変更(JobID: %d)", job.JobID)
-
+	buildStart := time.Now()
 	// スナップショットから画像とラベルのマップを収集
 	trainingData, err := db.FetchTrainingDataByJobID(database, status.ID)
 	if err != nil {
 		log.Printf("[TRAIN-WORKER-ERROR] ❌ データ収集失敗 (JobID: %d): %v", job.JobID, err)
 		return
 	}
+	log.Printf("[PROFILE] trainingData 組み立て所要時間: %v (JobID: %d)", time.Since(buildStart), job.JobID)
 
 	// 収集した trainingData を元にZIPファイルを組み立てる
 	zipPath, err := CreateTrainingZip(trainingData, job.JobID)
