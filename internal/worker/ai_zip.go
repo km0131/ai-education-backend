@@ -54,7 +54,10 @@ func CreateTrainingZip(trainingData map[int][]string, jobID uint) (string, error
 			imageCounter++
 
 			// ZIP内に新しいファイルのエントリを作成
-			writer, err := zipWriter.Create(zipInnerFilename)
+			writer, err := zipWriter.CreateHeader(&zip.FileHeader{
+				Name:   zipInnerFilename,
+				Method: zip.Store, // 無圧縮(画像はすでに圧縮済みデータのため、圧縮の意味がない)
+			})
 			if err != nil {
 				srcFile.Close()
 				return "", fmt.Errorf("failed to create zip entry for %s: %w", zipInnerFilename, err)

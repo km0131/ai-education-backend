@@ -53,7 +53,10 @@ func TestExecutionWorker(data *gorm.DB, status int, projectID uuid.UUID, courseI
 		ext := filepath.Ext(img.ImageURL)
 		zipInnerFilename := fmt.Sprintf("images/test_%d%s", img.ID, ext)
 
-		writer, err := zipWriter.Create(zipInnerFilename)
+		writer, err := zipWriter.CreateHeader(&zip.FileHeader{
+			Name:   zipInnerFilename,
+			Method: zip.Store,
+		})
 		if err != nil {
 			srcFile.Close()
 			return "", fmt.Errorf("failed to create zip entry for image %s: %w", zipInnerFilename, err)
@@ -101,7 +104,10 @@ func TestExecutionWorker(data *gorm.DB, status int, projectID uuid.UUID, courseI
 						continue
 					}
 					zipInnerModelPath := filepath.Join("models", file.Name())
-					writer, err := zipWriter.Create(zipInnerModelPath)
+					writer, err := zipWriter.CreateHeader(&zip.FileHeader{
+						Name:   zipInnerModelPath,
+						Method: zip.Store,
+					})
 					if err != nil {
 						modelFile.Close()
 						return "", fmt.Errorf("failed to create zip entry for model %s: %w", zipInnerModelPath, err)
