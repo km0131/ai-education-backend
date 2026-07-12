@@ -540,7 +540,7 @@ func toPublicURL(webModelRoot string, apiBaseURL string) AvailableModels {
 	trimmed := strings.TrimPrefix(webModelRoot, "./storage/models")
 	trimmed = strings.Trim(trimmed, "/")
 
-	base := fmt.Sprintf("%s/models/%s", strings.TrimRight(apiBaseURL, "/"), trimmed)
+	base := fmt.Sprintf("%s/storage/models/%s", strings.TrimRight(apiBaseURL, "/"), trimmed)
 
 	// 3モデルとも .tflite へ移行済み(LiteRT.jsから呼び出す)。フロントはtfjsを使わず、
 	// 常にLiteRT.js経由でロードする。.keras/.ptは変換前の元モデル(アーカイブ用)としてのみ保持する。

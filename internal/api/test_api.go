@@ -14,7 +14,6 @@ import (
 )
 
 // SendTestZipToPython は生成したテスト実行用ZIP（テスト画像・モデル・結果用JSON）をPythonの推論APIへ送信します
-// SendTestZipToPython は生成したテスト実行用ZIP（テスト画像・モデル・結果用JSON）をPythonの推論APIへ送信します
 // 処理結果は後でPython側から別途Webhook（受け取り用API）経由で送られてくるため、ここでは送信の受理確認のみ行う
 func SendTestZipToPython(statusID uint, zipPath string) error {
 	apiURL := os.Getenv("PYTHON_TEST_URL")

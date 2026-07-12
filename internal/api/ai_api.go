@@ -149,3 +149,58 @@ func SendTrainingZipToGCP(jobID uint, zipPath string) error {
 	log.Printf("[INFO] GCPへのZIP送信およびAI作成リクエストが正常に受け付けられました（JobID: %d）", jobID)
 	return nil
 }
+
+type reduceDiversityRequest struct {
+	Vectors [][]float64 `json:"vectors"`
+}
+
+type reduceDiversityResponse struct {
+	Points [][]float64 `json:"points"`
+}
+
+// CallPythonReduceDiversityAPI は複数画像の高次元diversity_vectorをまとめてPCAで2次元に圧縮する。
+// image_evaluation_get の表示リクエストのたびに呼ばれる想定(バッチ処理・永続化はしない)。
+func CallPythonReduceDiversityAPI(vectors [][]float64) ([][]float64, error) {
+	if len(vectors) == 0 {
+		return [][]float64{}, nil
+	}
+
+	apiURL := os.Getenv("PYTHON_REDUCE_DIVERSITY_API_URL")
+	if apiURL == "" {
+		apiURL = "http://localhost:5000/reduce_diversity"
+	}
+
+	reqBody, err := json.Marshal(reduceDiversityRequest{Vectors: vectors})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal reduce_diversity request: %w", err)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	req, err := http.NewRequest("POST", apiURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	pythonSecret := os.Getenv("PYTHON_API_SECRET")
+	if pythonSecret == "" {
+		pythonSecret = "secure_python_analyze_secret_token_abc" // Python側のデフォルトと合わせる
+	}
+	req.Header.Set("Authorization", "Bearer "+pythonSecret)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		errorBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("reduce_diversity api error: status %d, body: %s", resp.StatusCode, string(errorBody))
+	}
+
+	var result reduceDiversityResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return result.Points, nil
+}

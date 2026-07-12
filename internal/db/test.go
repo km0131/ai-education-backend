@@ -1,6 +1,7 @@
 package db
 
 import (
+	"ai-education/backend/internal/api"
 	"ai-education/backend/internal/model"
 	"errors"
 	"fmt"
@@ -541,5 +542,82 @@ func GetImageEvaluationDB(database *gorm.DB, projectID uuid.UUID) (*ImageEvaluat
 		}
 	}
 
+	reduceDiversityVectors(summary)
+
 	return summary, nil
+}
+
+// reduceDiversityVectors: 各Photographの高次元diversity_vectorをPythonの/reduce_diversityへ
+// まとめて送り、PCAで2次元化した結果に差し替える(表示リクエストのたびに計算し直す。永続化しない)。
+// 過去に別次元数で解析されたデータが混在する可能性があるため、最も多い次元数のベクトルのみを対象にし、
+// 対象外(未解析・次元不一致)のPhotographsは原点(0,0)にフォールバックする。
+// Python側呼び出しが失敗した場合は元の高次元ベクトルのまま返す(致命的エラーにはしない)。
+func reduceDiversityVectors(summary *ImageEvaluationSummary) {
+	type vectorRef struct {
+		catIdx   int
+		photoIdx int
+	}
+
+	lengthCounts := make(map[int]int)
+	for _, cat := range summary.Categories {
+		for _, p := range cat.Photographs {
+			if len(p.DiversityVector) > 0 {
+				lengthCounts[len(p.DiversityVector)]++
+			}
+		}
+	}
+	majorityLen, majorityCount := 0, 0
+	for length, count := range lengthCounts {
+		if count > majorityCount {
+			majorityLen, majorityCount = length, count
+		}
+	}
+	if majorityLen == 0 {
+		return
+	}
+
+	var refs []vectorRef
+	var vectors [][]float64
+	for ci, cat := range summary.Categories {
+		for pi, p := range cat.Photographs {
+			if len(p.DiversityVector) == majorityLen {
+				refs = append(refs, vectorRef{catIdx: ci, photoIdx: pi})
+				vectors = append(vectors, []float64(p.DiversityVector))
+			}
+		}
+	}
+
+	points, err := api.CallPythonReduceDiversityAPI(vectors)
+	if err != nil {
+		log.Printf("[WARN] diversity_vectorの2次元化に失敗しました(元の高次元ベクトルのまま返します): %v", err)
+		return
+	}
+
+	for i, ref := range refs {
+		if i < len(points) {
+			summary.Categories[ref.catIdx].Photographs[ref.photoIdx].DiversityVector = model.FloatSlice(points[i])
+		}
+	}
+	// PCA対象外(未解析・次元不一致)のPhotographsは2次元の原点にフォールバックする
+	for ci, cat := range summary.Categories {
+		for pi, p := range cat.Photographs {
+			if len(p.DiversityVector) != 2 {
+				summary.Categories[ci].Photographs[pi].DiversityVector = model.FloatSlice{0, 0}
+			}
+		}
+	}
+
+	// 2次元化後の値でカテゴリ別・全体の平均を再計算する
+	var overallSum []float64
+	var overallCount int
+	for ci, cat := range summary.Categories {
+		var catSum []float64
+		for _, p := range cat.Photographs {
+			catSum = addVector(catSum, p.DiversityVector)
+		}
+		summary.Categories[ci].AverageDiversityVector = averageVectors(catSum, len(cat.Photographs))
+		overallSum = addVector(overallSum, model.FloatSlice(catSum))
+		overallCount += len(cat.Photographs)
+	}
+	summary.OverallAverage.AverageDiversityVector = averageVectors(overallSum, overallCount)
 }
