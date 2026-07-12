@@ -66,6 +66,15 @@ docker compose up --build
 podman-compose up --build
 ```
 
+- 常時稼働させたい場合の対処法
+```
+podman-compose up --build -d
+```
+- ログの確認
+```
+podman-compose logs -f
+```
+
 - コンテナの停止
 ```
 podman-compose down

@@ -3,7 +3,7 @@ version: '3.8'
 services:
   # --- PostgreSQL ---
   db:
-    image: postgres:17-alpine
+    image: docker.io/library/postgres:17-alpine
     networks:
       ai-net:
         aliases:
@@ -18,7 +18,7 @@ services:
     volumes:
       - ./postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -33,7 +33,7 @@ services:
       - ai-net
     env_file: .env
     ports:
-      - "8080:8080"
+      - "8085:8080"
     environment:
       - CHOKIDAR_USEPOLLING=true
       - GIN_MODE=release
@@ -63,7 +63,7 @@ services:
 
   # --- SurrealDB ---
   surrealdb:
-    image: surrealdb/surrealdb:latest
+    image: docker.io/surrealdb/surrealdb:latest
     networks:
       - ai-net
     command: start --log trace --user ${SURREALDB_USER:-root} --pass ${SURREALDB_PASS:-root} rocksdb:/data/database.db
