@@ -31,33 +31,60 @@ func GenerateNewFilename(originalFilename string) string {
 }
 
 func SaveAndAnalyze(database *gorm.DB, userID uuid.UUID, rot model.ImageUploadRequest, file *multipart.FileHeader) (*model.AiPhotograph, error) {
-	// ファイル名生成
-	filename := uuid.New().String() + filepath.Ext(file.Filename)
-	savePath := fmt.Sprintf("images/ai_photogrph/%s/%s", userID.String(), filename)
+	// ファイル名生成(リサイズ版とオリジナル版で同じUUIDを共有し、拡張子だけ変える)
+	baseName := uuid.New().String()
+	originalFilename := baseName + filepath.Ext(file.Filename)
+	resizedFilename := baseName + ".jpg"
 
-	// ディレクトリ作成とファイル保存はここで実行
+	// リサイズ版は今までと全く同じパス。オリジナルはディレクトリ名だけ差し替えたパスに保存する
+	savePath := fmt.Sprintf("images/ai_photogrph/%s/%s", userID.String(), resizedFilename)
+	originalSavePath := fmt.Sprintf("images/ai_photogrph_original/%s/%s", userID.String(), originalFilename)
+
+	if err := os.MkdirAll(filepath.Dir(originalSavePath), 0755); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(savePath), 0755); err != nil {
 		return nil, err
 	}
 
-	//ファイルを物理的に作成して中身を書き込む
-	// multipart.FileHeader からストリームを開く
+	// 1. アップロードされたファイルをオリジナルとして無変換で保存する
 	src, err := file.Open()
 	if err != nil {
 		return nil, fmt.Errorf("failed to open uploaded file: %w", err)
 	}
 	defer src.Close()
 
-	// 保存先のファイルを新規作成
-	dst, err := os.Create(savePath)
+	dstOriginal, err := os.Create(originalSavePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create destination file: %w", err)
+		return nil, fmt.Errorf("failed to create original destination file: %w", err)
 	}
-	defer dst.Close()
+	if _, err = io.Copy(dstOriginal, src); err != nil {
+		dstOriginal.Close()
+		return nil, fmt.Errorf("failed to save original file to disk: %w", err)
+	}
+	dstOriginal.Close()
 
-	// 中身をまるごとコピーしてディスクに書き出す
-	if _, err = io.Copy(dst, src); err != nil {
-		return nil, fmt.Errorf("failed to save file to disk: %w", err)
+	// 2. 保存したオリジナルを開いてデコードする
+	img, err := imaging.Open(originalSavePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode original image: %w", err)
+	}
+
+	// 3. 長辺が512pxを超えていればアスペクト比を維持したままリサイズする
+	bounds := img.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	longSide := max(width, height)
+	if longSide > maxImageLongSide {
+		if width >= height {
+			img = imaging.Resize(img, maxImageLongSide, 0, imaging.Lanczos)
+		} else {
+			img = imaging.Resize(img, 0, maxImageLongSide, imaging.Lanczos)
+		}
+	}
+
+	// 4. リサイズ後の画像を、今までと同じパスにJPEG品質85で保存する
+	if err := imaging.Save(img, savePath, imaging.JPEGQuality(85)); err != nil {
+		return nil, fmt.Errorf("failed to save resized image: %w", err)
 	}
 
 	var photo *model.AiPhotograph
