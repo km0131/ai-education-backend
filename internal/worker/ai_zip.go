@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/goccy/go-json"
 )
@@ -20,10 +19,6 @@ type MetadataEntry struct {
 
 // CreateTrainingZip は収集したデータから metadata.json と画像群を含むZIPファイルを一時ディレクトリに作成します
 func CreateTrainingZip(trainingData map[int][]string, jobID uint) (string, error) {
-	start := time.Now()
-	defer func() {
-		log.Printf("[PROFILE] CreateTrainingZip 所要時間: %v (JobID: %d)", time.Since(start), jobID)
-	}()
 	// 一時ディレクトリ（/tmp など）にZIPファイルを作成
 	zipFilename := fmt.Sprintf("training_job_%d.zip", jobID)
 	zipPath := filepath.Join(os.TempDir(), zipFilename)

@@ -12,9 +12,15 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/disintegration/imaging"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
+
+// アップロード画像をリサイズする際の長辺の上限(px)。
+// このプロジェクトで使う3モデル(CNN/ViT/MobileViT-v2)の最大入力サイズ(380px)を
+// 十分カバーできるサイズとして設定している。
+const maxImageLongSide = 512
 
 func GenerateNewFilename(originalFilename string) string {
 	// 元ファイルの拡張子を取得 (.jpg など)
