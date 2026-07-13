@@ -491,6 +491,7 @@ type AvailableModels struct {
 type LabelInfo struct {
 	CategoryIndex int    `json:"category_index"`
 	Title         string `json:"title"`
+	Explanation   string `json:"explanation"`
 }
 
 func AiModelDB(database *gorm.DB, projectID uuid.UUID) (*AiModelWithLabels, error) {
@@ -516,7 +517,11 @@ func AiModelDB(database *gorm.DB, projectID uuid.UUID) (*AiModelWithLabels, erro
 	}
 	labelInfos := make([]LabelInfo, 0, len(uniqueMap))
 	for _, l := range uniqueMap {
-		labelInfos = append(labelInfos, LabelInfo{CategoryIndex: l.CategoryIndex, Title: l.Title})
+		labelInfos = append(labelInfos, LabelInfo{
+			CategoryIndex: l.CategoryIndex,
+			Title:         l.Title,
+			Explanation:   l.Explanation,
+		})
 	}
 	sort.Slice(labelInfos, func(i, j int) bool {
 		return labelInfos[i].CategoryIndex < labelInfos[j].CategoryIndex
