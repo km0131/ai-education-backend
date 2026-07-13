@@ -76,9 +76,9 @@ func SaveAndAnalyze(database *gorm.DB, userID uuid.UUID, rot model.ImageUploadRe
 	longSide := max(width, height)
 	if longSide > maxImageLongSide {
 		if width >= height {
-			img = imaging.Resize(img, maxImageLongSide, 0, imaging.Lanczos)
+			img = imaging.Resize(img, maxImageLongSide, 0, imaging.Linear)
 		} else {
-			img = imaging.Resize(img, 0, maxImageLongSide, imaging.Lanczos)
+			img = imaging.Resize(img, 0, maxImageLongSide, imaging.Linear)
 		}
 	}
 
