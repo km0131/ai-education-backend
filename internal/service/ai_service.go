@@ -30,44 +30,37 @@ func GenerateNewFilename(originalFilename string) string {
 	return uuid.New().String() + ext
 }
 
-func SaveAndAnalyze(database *gorm.DB, userID uuid.UUID, rot model.ImageUploadRequest, file *multipart.FileHeader) (*model.AiPhotograph, error) {
-	// ファイル名生成(リサイズ版とオリジナル版で同じUUIDを共有し、拡張子だけ変える)
-	baseName := uuid.New().String()
-	originalFilename := baseName + filepath.Ext(file.Filename)
-	resizedFilename := baseName + ".jpg"
-
-	// リサイズ版は今までと全く同じパス。オリジナルはディレクトリ名だけ差し替えたパスに保存する
-	savePath := fmt.Sprintf("images/ai_photogrph/%s/%s", userID.String(), resizedFilename)
-	originalSavePath := fmt.Sprintf("images/ai_photogrph_original/%s/%s", userID.String(), originalFilename)
-
+// saveOriginalAndResizedImage は、アップロードされたファイルをoriginalSavePathへ無変換で保存した上で、
+// 長辺がmaxImageLongSideを超える場合のみアスペクト比を維持してリサイズし、savePathへJPEG品質85で保存する。
+func saveOriginalAndResizedImage(file *multipart.FileHeader, originalSavePath, savePath string) error {
 	if err := os.MkdirAll(filepath.Dir(originalSavePath), 0755); err != nil {
-		return nil, err
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(savePath), 0755); err != nil {
-		return nil, err
+		return err
 	}
 
 	// 1. アップロードされたファイルをオリジナルとして無変換で保存する
 	src, err := file.Open()
 	if err != nil {
-		return nil, fmt.Errorf("failed to open uploaded file: %w", err)
+		return fmt.Errorf("failed to open uploaded file: %w", err)
 	}
 	defer src.Close()
 
 	dstOriginal, err := os.Create(originalSavePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create original destination file: %w", err)
+		return fmt.Errorf("failed to create original destination file: %w", err)
 	}
 	if _, err = io.Copy(dstOriginal, src); err != nil {
 		dstOriginal.Close()
-		return nil, fmt.Errorf("failed to save original file to disk: %w", err)
+		return fmt.Errorf("failed to save original file to disk: %w", err)
 	}
 	dstOriginal.Close()
 
 	// 2. 保存したオリジナルを開いてデコードする
 	img, err := imaging.Open(originalSavePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode original image: %w", err)
+		return fmt.Errorf("failed to decode original image: %w", err)
 	}
 
 	// 3. 長辺が512pxを超えていればアスペクト比を維持したままリサイズする
@@ -84,14 +77,30 @@ func SaveAndAnalyze(database *gorm.DB, userID uuid.UUID, rot model.ImageUploadRe
 
 	// 4. リサイズ後の画像を、今までと同じパスにJPEG品質85で保存する
 	if err := imaging.Save(img, savePath, imaging.JPEGQuality(85)); err != nil {
-		return nil, fmt.Errorf("failed to save resized image: %w", err)
+		return fmt.Errorf("failed to save resized image: %w", err)
+	}
+	return nil
+}
+
+func SaveAndAnalyze(database *gorm.DB, userID uuid.UUID, rot model.ImageUploadRequest, file *multipart.FileHeader) (*model.AiPhotograph, error) {
+	// ファイル名生成(リサイズ版とオリジナル版で同じUUIDを共有し、拡張子だけ変える)
+	baseName := uuid.New().String()
+	originalFilename := baseName + filepath.Ext(file.Filename)
+	resizedFilename := baseName + ".jpg"
+
+	// リサイズ版は今までと全く同じパス。オリジナルはディレクトリ名だけ差し替えたパスに保存する
+	savePath := fmt.Sprintf("images/ai_photogrph/%s/%s", userID.String(), resizedFilename)
+	originalSavePath := fmt.Sprintf("images/ai_photogrph_original/%s/%s", userID.String(), originalFilename)
+
+	if err := saveOriginalAndResizedImage(file, originalSavePath, savePath); err != nil {
+		return nil, err
 	}
 
 	var photo *model.AiPhotograph
 	var targetConfigUUID uuid.UUID
 
 	// トランザクションでデータの整合性を100%保証する
-	err = database.Transaction(func(tx *gorm.DB) error {
+	err := database.Transaction(func(tx *gorm.DB) error {
 		parsedSessionID, err := uuid.Parse(rot.UploadSessionID)
 		// プロジェクト(箱)を作成
 		config, err := db.GetOrCreateConfig(tx, userID, rot.CourseID, rot.Title, parsedSessionID)

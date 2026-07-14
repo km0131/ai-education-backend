@@ -5,10 +5,8 @@ import (
 	"ai-education/backend/internal/model"
 	"ai-education/backend/internal/worker"
 	"fmt"
-	"io"
 	"log"
 	"mime/multipart"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -18,33 +16,17 @@ import (
 
 // テスト画像の登録
 func CreatingTestDataset(data *gorm.DB, res model.ImageUploadResponse, file *multipart.FileHeader) error {
-	// ファイル名生成
-	filename := uuid.New().String() + filepath.Ext(file.Filename)
-	savePath := fmt.Sprintf("images/test_photogrph/%d/%s", res.CourseID, filename)
+	// ファイル名生成(リサイズ版とオリジナル版で同じUUIDを共有し、拡張子だけ変える)
+	baseName := uuid.New().String()
+	originalFilename := baseName + filepath.Ext(file.Filename)
+	resizedFilename := baseName + ".jpg"
 
-	// ディレクトリ作成とファイル保存はここで実行
-	if err := os.MkdirAll(filepath.Dir(savePath), 0755); err != nil {
+	// リサイズ版は今までと全く同じパス。オリジナルはディレクトリ名だけ差し替えたパスに保存する
+	savePath := fmt.Sprintf("images/test_photogrph/%d/%s", res.CourseID, resizedFilename)
+	originalSavePath := fmt.Sprintf("images/test_photogrph_original/%d/%s", res.CourseID, originalFilename)
+
+	if err := saveOriginalAndResizedImage(file, originalSavePath, savePath); err != nil {
 		return err
-	}
-
-	//ファイルを物理的に作成して中身を書き込む
-	// multipart.FileHeader からストリームを開く
-	src, err := file.Open()
-	if err != nil {
-		return fmt.Errorf("failed to open uploaded file: %w", err)
-	}
-	defer src.Close()
-
-	// 保存先のファイルを新規作成
-	dst, err := os.Create(savePath)
-	if err != nil {
-		return fmt.Errorf("failed to create destination file: %w", err)
-	}
-	defer dst.Close()
-
-	// 中身をまるごとコピーしてディスクに書き出す
-	if _, err = io.Copy(dst, src); err != nil {
-		return fmt.Errorf("failed to save file to disk: %w", err)
 	}
 
 	batchID, err := uuid.Parse(res.BatchID)
