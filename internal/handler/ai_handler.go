@@ -166,5 +166,6 @@ func (h *Handler) GetModelFile(c *gin.Context) {
 		return
 	}
 	// ファイルが見つかったらGinのStaticFileで配信する
+	c.Header("Cache-Control", "private, max-age=31536000, immutable")
 	c.File(fullPath)
 }

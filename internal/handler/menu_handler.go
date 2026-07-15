@@ -100,10 +100,11 @@ func (h *Handler) GetAiPhotographImage(c *gin.Context) {
 		return
 	}
 	// ファイルが見つかったらGinのStaticFileで配信する
+	c.Header("Cache-Control", "private, max-age=31536000, immutable")
 	c.File(fullPath)
 }
 
-// 新しいハンドラー：AI学習用画像の提供ハンドラー
+// 新しいハンドラー：AIテスト画像の提供ハンドラー
 func (h *Handler) GetTestImage(c *gin.Context) {
 	// 既存の PostPasswordImage と同じロジックを流用
 
@@ -133,6 +134,7 @@ func (h *Handler) GetTestImage(c *gin.Context) {
 		return
 	}
 	// ファイルが見つかったらGinのStaticFileで配信する
+	c.Header("Cache-Control", "private, max-age=31536000, immutable")
 	c.File(fullPath)
 }
 
