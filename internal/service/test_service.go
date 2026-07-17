@@ -15,7 +15,7 @@ import (
 )
 
 // テスト画像の登録
-func CreatingTestDataset(data *gorm.DB, res model.ImageUploadResponse, file *multipart.FileHeader) error {
+func CreatingTestDataset(data *gorm.DB, res model.ImageUploadResponse, file *multipart.FileHeader, resizedFile *multipart.FileHeader) error {
 	// ファイル名生成(リサイズ版とオリジナル版で同じUUIDを共有し、拡張子だけ変える)
 	baseName := uuid.New().String()
 	originalFilename := baseName + filepath.Ext(file.Filename)
@@ -25,7 +25,7 @@ func CreatingTestDataset(data *gorm.DB, res model.ImageUploadResponse, file *mul
 	savePath := fmt.Sprintf("images/test_photogrph/%d/%s", res.CourseID, resizedFilename)
 	originalSavePath := fmt.Sprintf("images/test_photogrph_original/%d/%s", res.CourseID, originalFilename)
 
-	if err := saveOriginalAndResizedImage(file, originalSavePath, savePath); err != nil {
+	if err := saveOriginalAndResizedImage(file, resizedFile, originalSavePath, savePath); err != nil {
 		return err
 	}
 

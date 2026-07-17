@@ -5,6 +5,7 @@ import (
 	"ai-education/backend/internal/model"
 	"ai-education/backend/internal/worker"
 	"fmt"
+	"image"
 	"io"
 	"log"
 	"mime/multipart"
@@ -30,9 +31,45 @@ func GenerateNewFilename(originalFilename string) string {
 	return uuid.New().String() + ext
 }
 
-// saveOriginalAndResizedImage は、アップロードされたファイルをoriginalSavePathへ無変換で保存した上で、
-// 長辺がmaxImageLongSideを超える場合のみアスペクト比を維持してリサイズし、savePathへJPEG品質85で保存する。
-func saveOriginalAndResizedImage(file *multipart.FileHeader, originalSavePath, savePath string) error {
+// saveMultipartFile は、アップロードされたファイルを無変換のままdestPathへ保存する。
+func saveMultipartFile(fh *multipart.FileHeader, destPath string) error {
+	src, err := fh.Open()
+	if err != nil {
+		return fmt.Errorf("failed to open uploaded file: %w", err)
+	}
+	defer src.Close()
+
+	dst, err := os.Create(destPath)
+	if err != nil {
+		return fmt.Errorf("failed to create destination file: %w", err)
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, src); err != nil {
+		return fmt.Errorf("failed to save file to disk: %w", err)
+	}
+	return nil
+}
+
+// resizeToMaxLongSide は、長辺がmaxImageLongSideを超える場合のみアスペクト比を維持してリサイズする。
+func resizeToMaxLongSide(img image.Image) image.Image {
+	bounds := img.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	if max(width, height) <= maxImageLongSide {
+		return img
+	}
+	if width >= height {
+		return imaging.Resize(img, maxImageLongSide, 0, imaging.Linear)
+	}
+	return imaging.Resize(img, 0, maxImageLongSide, imaging.Linear)
+}
+
+// saveOriginalAndResizedImage は、アップロードされたファイルをoriginalSavePathへ無変換で保存する。
+// resizedFileが渡された場合(フロントエンドで既に長辺512px以下にリサイズ済みの場合)は、それをそのままsavePathへ保存する
+// (長辺が512pxを超えていた場合のみ、念のためサーバー側でも縮小するフォールバックを行う)。
+// resizedFileがnilの場合(フロントでのリサイズに失敗した場合など)は、従来通りオリジナルから
+// サーバー側でリサイズ・JPEG品質85で保存する。
+func saveOriginalAndResizedImage(file *multipart.FileHeader, resizedFile *multipart.FileHeader, originalSavePath, savePath string) error {
 	if err := os.MkdirAll(filepath.Dir(originalSavePath), 0755); err != nil {
 		return err
 	}
@@ -41,48 +78,46 @@ func saveOriginalAndResizedImage(file *multipart.FileHeader, originalSavePath, s
 	}
 
 	// 1. アップロードされたファイルをオリジナルとして無変換で保存する
-	src, err := file.Open()
-	if err != nil {
-		return fmt.Errorf("failed to open uploaded file: %w", err)
+	if err := saveMultipartFile(file, originalSavePath); err != nil {
+		return err
 	}
-	defer src.Close()
 
-	dstOriginal, err := os.Create(originalSavePath)
-	if err != nil {
-		return fmt.Errorf("failed to create original destination file: %w", err)
-	}
-	if _, err = io.Copy(dstOriginal, src); err != nil {
-		dstOriginal.Close()
-		return fmt.Errorf("failed to save original file to disk: %w", err)
-	}
-	dstOriginal.Close()
+	if resizedFile != nil {
+		// 2a. フロントエンドがリサイズ済み画像を送ってきた場合は、それをそのまま保存する
+		if err := saveMultipartFile(resizedFile, savePath); err != nil {
+			return err
+		}
 
-	// 2. 保存したオリジナルを開いてデコードする
+		img, err := imaging.Open(savePath)
+		if err != nil {
+			return fmt.Errorf("failed to decode resized image: %w", err)
+		}
+		bounds := img.Bounds()
+		if max(bounds.Dx(), bounds.Dy()) <= maxImageLongSide {
+			return nil
+		}
+
+		// フロント側のリサイズが不十分だった場合のフォールバック
+		img = resizeToMaxLongSide(img)
+		if err := imaging.Save(img, savePath, imaging.JPEGQuality(85)); err != nil {
+			return fmt.Errorf("failed to save resized image: %w", err)
+		}
+		return nil
+	}
+
+	// 2b. リサイズ済み画像が送られてこなかった場合のフォールバック: オリジナルから生成する
 	img, err := imaging.Open(originalSavePath)
 	if err != nil {
 		return fmt.Errorf("failed to decode original image: %w", err)
 	}
-
-	// 3. 長辺が512pxを超えていればアスペクト比を維持したままリサイズする
-	bounds := img.Bounds()
-	width, height := bounds.Dx(), bounds.Dy()
-	longSide := max(width, height)
-	if longSide > maxImageLongSide {
-		if width >= height {
-			img = imaging.Resize(img, maxImageLongSide, 0, imaging.Linear)
-		} else {
-			img = imaging.Resize(img, 0, maxImageLongSide, imaging.Linear)
-		}
-	}
-
-	// 4. リサイズ後の画像を、今までと同じパスにJPEG品質85で保存する
+	img = resizeToMaxLongSide(img)
 	if err := imaging.Save(img, savePath, imaging.JPEGQuality(85)); err != nil {
 		return fmt.Errorf("failed to save resized image: %w", err)
 	}
 	return nil
 }
 
-func SaveAndAnalyze(database *gorm.DB, userID uuid.UUID, rot model.ImageUploadRequest, file *multipart.FileHeader) (*model.AiPhotograph, error) {
+func SaveAndAnalyze(database *gorm.DB, userID uuid.UUID, rot model.ImageUploadRequest, file *multipart.FileHeader, resizedFile *multipart.FileHeader) (*model.AiPhotograph, error) {
 	// ファイル名生成(リサイズ版とオリジナル版で同じUUIDを共有し、拡張子だけ変える)
 	baseName := uuid.New().String()
 	originalFilename := baseName + filepath.Ext(file.Filename)
@@ -92,7 +127,7 @@ func SaveAndAnalyze(database *gorm.DB, userID uuid.UUID, rot model.ImageUploadRe
 	savePath := fmt.Sprintf("images/ai_photogrph/%s/%s", userID.String(), resizedFilename)
 	originalSavePath := fmt.Sprintf("images/ai_photogrph_original/%s/%s", userID.String(), originalFilename)
 
-	if err := saveOriginalAndResizedImage(file, originalSavePath, savePath); err != nil {
+	if err := saveOriginalAndResizedImage(file, resizedFile, originalSavePath, savePath); err != nil {
 		return nil, err
 	}
 

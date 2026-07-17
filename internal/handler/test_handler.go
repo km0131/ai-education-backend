@@ -29,12 +29,14 @@ func (h *Handler) UploadingTestImage(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "コースIDとラベルは必要です"})
 		return
 	}
-	file, err := c.FormFile("file") // ファイル
+	file, err := c.FormFile("file") // オリジナルファイル
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "ファイル送信なし"})
 		return
 	}
-	err = service.CreatingTestDataset(h.DB, req, file)
+	// フロントエンドで長辺512px以下にリサイズ済みの画像(任意。無ければサーバー側でリサイズする)
+	resizedFile, _ := c.FormFile("resized_file")
+	err = service.CreatingTestDataset(h.DB, req, file, resizedFile)
 	if err != nil {
 		log.Printf("[Error] テスト画像の登録に失敗: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "テストデータの保存に失敗しました"})

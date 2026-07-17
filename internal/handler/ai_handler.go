@@ -28,13 +28,15 @@ func (h *Handler) UploadImage(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "コースIDとカテゴリIDは必須です"})
 		return
 	}
-	file, err := c.FormFile("file") // ファイル
+	file, err := c.FormFile("file") // オリジナルファイル
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "ファイル送信なし"})
 		return
 	}
+	// フロントエンドで長辺512px以下にリサイズ済みの画像(任意。無ければサーバー側でリサイズする)
+	resizedFile, _ := c.FormFile("resized_file")
 	// Serviceを使って保存と分析開始
-	photo, err := service.SaveAndAnalyze(h.DB, userId, req, file)
+	photo, err := service.SaveAndAnalyze(h.DB, userId, req, file, resizedFile)
 
 	c.JSON(http.StatusCreated, photo)
 }
