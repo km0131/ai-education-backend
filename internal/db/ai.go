@@ -263,11 +263,16 @@ func AiSearchDB(database *gorm.DB, courseID uint) ([]model.AiCard, error) {
 		if err != nil {
 			continue
 		}
+		testStatus, err := GetLatestTestStatusByTrainingJobID(database, status.ID)
+		if err != nil {
+			continue
+		}
 		card := model.AiCard{
 			ProjectUUID: config[i].ProjectUUID,
 			Title:       config[i].Title,
 			StudentName: displayName,
 			Status:      status.Status,
+			TestStatus:  testStatus,
 			UpdatedAt:   config[i].UpdatedAt,
 			Version:     status.Version,
 		}

@@ -260,6 +260,22 @@ func UpTestStatus(db *gorm.DB, projectID uuid.UUID, userID uuid.UUID) (*model.St
 	return &newJob, nil, nil
 }
 
+// GetLatestTestStatusByTrainingJobID は指定された学習ジョブ（TrainingJobID）に紐づく
+// 最新のStudentTestJobのStatusを取得します。まだテストジョブが作成されていない場合は "pending" を返します
+func GetLatestTestStatusByTrainingJobID(db *gorm.DB, trainingJobID uint) (string, error) {
+	var testJob model.StudentTestJob
+	err := db.Where("training_job_id = ?", trainingJobID).
+		Order("created_at DESC").
+		First(&testJob).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "pending", nil
+		}
+		return "", err
+	}
+	return testJob.Status, nil
+}
+
 // GetTestImagesByProject はプロジェクトに紐づくテスト画像一覧を取得します
 func GetTestImagesByProject(db *gorm.DB, courseid uint) ([]model.TestImage, error) {
 	var images []model.TestImage

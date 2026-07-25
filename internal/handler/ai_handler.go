@@ -37,6 +37,11 @@ func (h *Handler) UploadImage(c *gin.Context) {
 	resizedFile, _ := c.FormFile("resized_file")
 	// Serviceを使って保存と分析開始
 	photo, err := service.SaveAndAnalyze(h.DB, userId, req, file, resizedFile)
+	if err != nil {
+		log.Printf("[ERROR] UploadImage failed: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "画像の登録に失敗しました。", "filename": file.Filename})
+		return
+	}
 
 	c.JSON(http.StatusCreated, photo)
 }

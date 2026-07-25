@@ -39,7 +39,7 @@ func (h *Handler) UploadingTestImage(c *gin.Context) {
 	err = service.CreatingTestDataset(h.DB, req, file, resizedFile)
 	if err != nil {
 		log.Printf("[Error] テスト画像の登録に失敗: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "テストデータの保存に失敗しました"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "テストデータの保存に失敗しました", "filename": file.Filename})
 		return
 	}
 }

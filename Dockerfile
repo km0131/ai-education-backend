@@ -3,7 +3,9 @@ FROM docker.io/library/golang:1.25-alpine
 
 # ビルドに必要な最小限のツール（gccなど）をインストール
 # GORMなどでCGOを使う場合は build-base が必要になることがあります
-RUN apk add --no-cache git gcc musl-dev
+# libheif-tools: フロントで変換できなかったHEIC/HEIFのフォールバック変換(heif-convertコマンド)に使用
+# exiftool: 一眼カメラのRAW(CR2/CR3)から埋め込みJPEGプレビューを抽出するフォールバックに使用
+RUN apk add --no-cache git gcc musl-dev libheif-tools exiftool
 
 WORKDIR /app
 

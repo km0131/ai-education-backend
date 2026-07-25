@@ -86,6 +86,7 @@ type AiCard struct {
 	Title       string    `json:"title" binding:"required"`
 	StudentName string    `json:"student_name" binding:"required"`
 	Status      string    `json:"status" binding:"required"`
+	TestStatus  string    `json:"test_status"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	Version     int       `json:"version"`
 }

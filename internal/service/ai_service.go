@@ -64,6 +64,37 @@ func resizeToMaxLongSide(img image.Image) image.Image {
 	return imaging.Resize(img, 0, maxImageLongSide, imaging.Linear)
 }
 
+// decodeWithFallback は、まず通常のimaging.Openでのデコードを試みる。
+// それが失敗した場合のみ、拡張子からHEIC/HEIF・RAW(CR2/CR3)と判断できるファイルに限って
+// 外部コマンド(heif-convert/exiftool)によるフォールバック変換を行う。
+// フロントエンドで変換済みのJPEGが大半を占めるため、この経路は「フロントで変換できなかった場合」
+// のみ通る想定であり、ラズパイへの負荷は最小限に抑えられる。
+func decodeWithFallback(path string, originalFilename string) (image.Image, error) {
+	img, err := imaging.Open(path)
+	if err == nil {
+		return img, nil
+	}
+
+	switch {
+	case isHeicFilename(originalFilename):
+		converted, convErr := convertHeicToJpeg(path)
+		if convErr != nil {
+			return nil, fmt.Errorf("HEIC画像の変換に失敗しました: %w", convErr)
+		}
+		defer os.Remove(converted)
+		return imaging.Open(converted)
+	case isRawFilename(originalFilename):
+		preview, prevErr := extractRawPreviewJpeg(path)
+		if prevErr != nil {
+			return nil, fmt.Errorf("RAW画像のプレビュー抽出に失敗しました: %w", prevErr)
+		}
+		defer os.Remove(preview)
+		return imaging.Open(preview)
+	default:
+		return nil, fmt.Errorf("failed to decode image (unsupported format): %w", err)
+	}
+}
+
 // saveOriginalAndResizedImage は、アップロードされたファイルをoriginalSavePathへ無変換で保存する。
 // resizedFileが渡された場合(フロントエンドで既に長辺512px以下にリサイズ済みの場合)は、それをそのままsavePathへ保存する
 // (長辺が512pxを超えていた場合のみ、念のためサーバー側でも縮小するフォールバックを行う)。
@@ -106,9 +137,9 @@ func saveOriginalAndResizedImage(file *multipart.FileHeader, resizedFile *multip
 	}
 
 	// 2b. リサイズ済み画像が送られてこなかった場合のフォールバック: オリジナルから生成する
-	img, err := imaging.Open(originalSavePath)
+	img, err := decodeWithFallback(originalSavePath, file.Filename)
 	if err != nil {
-		return fmt.Errorf("failed to decode original image: %w", err)
+		return err
 	}
 	img = resizeToMaxLongSide(img)
 	if err := imaging.Save(img, savePath, imaging.JPEGQuality(85)); err != nil {

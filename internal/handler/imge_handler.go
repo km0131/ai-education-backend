@@ -85,7 +85,8 @@ func (h *Handler) ImageUpdated(c *gin.Context) {
 	// Serviceを使って保存と分析開始
 	photo, err := service.SaveAndAnalyze(h.DB, userId, req, file, resizedFile)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "画像の登録に失敗しました。"})
+		log.Printf("[ERROR] ImageUpdated failed: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "画像の登録に失敗しました。", "filename": file.Filename})
 		return
 	}
 
