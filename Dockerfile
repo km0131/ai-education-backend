@@ -10,8 +10,8 @@ RUN apk add --no-cache git gcc musl-dev libheif-tools exiftool
 WORKDIR /app
 
 # ホットリロードツール Air のインストール
-# air-verse に移行した最新版を指定
-RUN go install github.com/air-verse/air@latest
+# バージョンを1.61.7に固定
+RUN go install github.com/air-verse/air@v1.61.7
 
 # 依存関係のコピーとキャッシュ利用
 COPY go.mod go.sum ./
