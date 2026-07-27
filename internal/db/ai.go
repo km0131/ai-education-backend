@@ -81,13 +81,16 @@ func CreateCategoryWithHistory(tx *gorm.DB, configID uuid.UUID, index int, title
 }
 
 // CreatePhotograph: 学習データの保存
-func CreatePhotograph(tx *gorm.DB, categoryID uuid.UUID, userID uuid.UUID, path string) (*model.AiPhotograph, error) {
+// conversionStatusは、フロントで既にリサイズ済みJPEGが揃っている通常時はConversionStatusReady、
+// HEIC/RAWのバックエンドフォールバック変換が非同期で必要な場合はConversionStatusProcessingを渡す。
+func CreatePhotograph(tx *gorm.DB, categoryID uuid.UUID, userID uuid.UUID, path string, conversionStatus string) (*model.AiPhotograph, error) {
 	// 新規作成
 	photo := &model.AiPhotograph{
-		CategoryID:     categoryID,
-		StudentID:      userID,
-		PhotographPath: path,
-		IsAnalyzed:     false,
+		CategoryID:       categoryID,
+		StudentID:        userID,
+		PhotographPath:   path,
+		IsAnalyzed:       false,
+		ConversionStatus: conversionStatus,
 	}
 	err := tx.Create(photo).Error
 	return photo, err
@@ -99,6 +102,35 @@ func GetPhotographByID(tx *gorm.DB, id string) (*model.AiPhotograph, error) {
 	result := tx.Where("id = ?", id).First(&photo)
 
 	return &photo, result.Error
+}
+
+// UpdatePhotoConversionStatus: バックグラウンドのHEIC/RAWフォールバック変換の結果をDBへ反映する。
+// errMsgは失敗時のみ渡し、成功時は空文字でよい。
+func UpdatePhotoConversionStatus(tx *gorm.DB, photoID uint, status string, errMsg string) error {
+	return tx.Model(&model.AiPhotograph{}).Where("id = ?", photoID).Updates(map[string]interface{}{
+		"conversion_status": status,
+		"conversion_error":  errMsg,
+	}).Error
+}
+
+// GetPhotographConversionStatuses: 指定したユーザー所有の写真IDに限定して変換状況を取得する
+// (他ユーザーの写真IDを混ぜて問い合わせても情報が漏れないようにstudent_idで絞り込む)
+func GetPhotographConversionStatuses(tx *gorm.DB, userID uuid.UUID, photoIDs []uint) ([]model.ConversionStatusEntry, error) {
+	var photos []model.AiPhotograph
+	if err := tx.Where("id IN ? AND student_id = ?", photoIDs, userID).
+		Find(&photos).Error; err != nil {
+		return nil, err
+	}
+
+	statuses := make([]model.ConversionStatusEntry, 0, len(photos))
+	for _, p := range photos {
+		statuses = append(statuses, model.ConversionStatusEntry{
+			PhotoID: p.ID,
+			Status:  p.ConversionStatus,
+			Error:   p.ConversionError,
+		})
+	}
+	return statuses, nil
 }
 
 // 分析結果を保存
@@ -129,9 +161,10 @@ func UpdatePhotoAnalysis(tx *gorm.DB, photoID int, data model.AnalysisData) erro
 }
 
 // CreateTrainingJobWithSnapshot: 指定されたプロジェクトUUID(configID)の現在の全画像をスナップショットとして固定し、Jobを作成する
-func CreateTrainingJobWithSnapshot(database *gorm.DB, configID uuid.UUID) (*model.AiTrainingJob, error) {
+// 戻り値のint は、変換失敗(failed)のため学習対象から除外した画像の件数(表示用。作成自体はブロックしない)。
+func CreateTrainingJobWithSnapshot(database *gorm.DB, configID uuid.UUID) (*model.AiTrainingJob, int, error) {
 	if database == nil {
-		return nil, fmt.Errorf("database connection is nil")
+		return nil, 0, fmt.Errorf("database connection is nil")
 	}
 
 	// トランザクション開始
@@ -152,9 +185,9 @@ func CreateTrainingJobWithSnapshot(database *gorm.DB, configID uuid.UUID) (*mode
 	if err != nil {
 		tx.Rollback()
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("pending training job not found")
+			return nil, 0, fmt.Errorf("pending training job not found")
 		}
-		return nil, err
+		return nil, 0, err
 	}
 	switch job.Status {
 
@@ -165,7 +198,7 @@ func CreateTrainingJobWithSnapshot(database *gorm.DB, configID uuid.UUID) (*mode
 			Where("config_id = ? AND is_current = ?", configID, true).
 			Update("is_current", false).Error; err != nil {
 			tx.Rollback()
-			return nil, err
+			return nil, 0, err
 		}
 		// Versionを1つ増やして新しいJobを作成
 		newJob := model.AiTrainingJob{
@@ -177,45 +210,71 @@ func CreateTrainingJobWithSnapshot(database *gorm.DB, configID uuid.UUID) (*mode
 
 		if err := tx.Create(&newJob).Error; err != nil {
 			tx.Rollback()
-			return nil, err
+			return nil, 0, err
 		}
 		// 以降の処理は新しいJobを使う
 		job = newJob
 
 	default:
 		tx.Rollback()
-		return nil, fmt.Errorf("unsupported status: %s", job.Status)
+		return nil, 0, fmt.Errorf("unsupported status: %s", job.Status)
 	}
 
 	fmt.Printf("[Debug] Job(ID:%d)へスナップショットを追加します。\n", job.ID)
 
 	// 3. スナップショット対象のデータ（現在のプロジェクトに属するすべての写真と、そのカテゴリのインデックス番号）を取得
 	type CurrentPhotoData struct {
-		PhotoID       uint
-		CategoryIndex int
+		PhotoID          uint
+		CategoryIndex    int
+		ConversionStatus string
 	}
 	var currentPhotos []CurrentPhotoData
 
 	err = tx.Model(&model.AiPhotograph{}).
-		Select("ai_photographs.id as photo_id, ai_categories.category_index as category_index").
+		Select("ai_photographs.id as photo_id, ai_categories.category_index as category_index, ai_photographs.conversion_status as conversion_status").
 		Joins("INNER JOIN ai_categories ON ai_categories.category_id = ai_photographs.category_id").
 		Where("ai_categories.config_id = ?", configID).
 		Scan(&currentPhotos).Error
 
 	if err != nil {
 		tx.Rollback()
-		return nil, fmt.Errorf("failed to fetch current photographs for snapshot: %v", err)
+		return nil, 0, fmt.Errorf("failed to fetch current photographs for snapshot: %v", err)
 	}
 
 	// もし学習に使える画像が1枚もない場合は、ここでロールバックしてエラーを返す（子供への通知用）
 	if len(currentPhotos) == 0 {
 		tx.Rollback()
-		return nil, fmt.Errorf("no photographs found for configuration %s; training cannot start", configID.String())
+		return nil, 0, fmt.Errorf("no photographs found for configuration %s; training cannot start", configID.String())
 	}
 
-	// 4. スナップショット用レコードのスライスを組み立て
-	snapshots := make([]model.AiTrainingJobSnapshot, len(currentPhotos))
-	for i, p := range currentPhotos {
+	// HEIC/RAWのバックグラウンド変換(ConversionStatus)がprocessing中の写真が1件でもあれば学習を開始しない。
+	// PhotographPathはレコード作成時点で確定して入っているため、パスの有無では変換完了を判定できない
+	// (processing中でも値は入っている)。実ファイルの完成有無はConversionStatusでのみ判定できる。
+	// failed(変換自体に失敗)は待っても完了しないため、ブロックはせず学習対象から除外するだけに留める。
+	var processingCount, failedCount int
+	readyPhotos := make([]CurrentPhotoData, 0, len(currentPhotos))
+	for _, p := range currentPhotos {
+		switch p.ConversionStatus {
+		case model.ConversionStatusProcessing:
+			processingCount++
+		case model.ConversionStatusFailed:
+			failedCount++
+		default:
+			readyPhotos = append(readyPhotos, p)
+		}
+	}
+	if processingCount > 0 {
+		tx.Rollback()
+		return nil, 0, fmt.Errorf("画像の変換が完了していません(処理中: %d件)。すべての画像の変換が完了してからAIを作成してください", processingCount)
+	}
+	if len(readyPhotos) == 0 {
+		tx.Rollback()
+		return nil, 0, fmt.Errorf("学習に使える画像がありません(変換失敗: %d件)。画像を確認してください", failedCount)
+	}
+
+	// 4. スナップショット用レコードのスライスを組み立て(変換失敗の画像は除外)
+	snapshots := make([]model.AiTrainingJobSnapshot, len(readyPhotos))
+	for i, p := range readyPhotos {
 		snapshots[i] = model.AiTrainingJobSnapshot{
 			AiTrainingJobID: job.ID, // 確定した Job ID (新規 or 既存) を紐付け
 			PhotographID:    p.PhotoID,
@@ -226,15 +285,15 @@ func CreateTrainingJobWithSnapshot(database *gorm.DB, configID uuid.UUID) (*mode
 	// GORMのバルクインサートで一括保存
 	if err := tx.Create(&snapshots).Error; err != nil {
 		tx.Rollback()
-		return nil, fmt.Errorf("failed to bulk insert training job snapshots: %v", err)
+		return nil, 0, fmt.Errorf("failed to bulk insert training job snapshots: %v", err)
 	}
 
 	// トランザクション確定
 	if err := tx.Commit().Error; err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	return &job, nil
+	return &job, failedCount, nil
 }
 
 // AI検索①

@@ -95,57 +95,75 @@ func decodeWithFallback(path string, originalFilename string) (image.Image, erro
 	}
 }
 
+// ResizeOutcome は saveOriginalAndResizedImage が savePath への書き込みをその場で完了できたか、
+// それとも重い外部コマンド(heif-convert/exiftool)によるフォールバックが必要で、
+// 呼び出し側がHTTPリクエストの外側で非同期に処理する必要があるかを表す。
+type ResizeOutcome int
+
+const (
+	ResizeOutcomeReady ResizeOutcome = iota
+	ResizeOutcomeNeedsFallback
+)
+
 // saveOriginalAndResizedImage は、アップロードされたファイルをoriginalSavePathへ無変換で保存する。
 // resizedFileが渡された場合(フロントエンドで既に長辺512px以下にリサイズ済みの場合)は、それをそのままsavePathへ保存する
 // (長辺が512pxを超えていた場合のみ、念のためサーバー側でも縮小するフォールバックを行う)。
-// resizedFileがnilの場合(フロントでのリサイズに失敗した場合など)は、従来通りオリジナルから
-// サーバー側でリサイズ・JPEG品質85で保存する。
-func saveOriginalAndResizedImage(file *multipart.FileHeader, resizedFile *multipart.FileHeader, originalSavePath, savePath string) error {
+// resizedFileがnilの場合(フロントのcreateImageBitmap/heic2anyがどちらも失敗した場合など)は、
+// まず通常デコード(imaging.Open)を試す。それも失敗し、かつHEIC/RAWと判断できるファイルの場合のみ、
+// heif-convert/exiftoolによる重い外部コマンド実行を避けてResizeOutcomeNeedsFallbackを返す
+// (実際の変換はHTTPリクエストの外側で非同期ジョブとして行う。scheduleFallbackConversion参照)。
+func saveOriginalAndResizedImage(file *multipart.FileHeader, resizedFile *multipart.FileHeader, originalSavePath, savePath string) (ResizeOutcome, error) {
 	if err := os.MkdirAll(filepath.Dir(originalSavePath), 0755); err != nil {
-		return err
+		return ResizeOutcomeReady, err
 	}
 	if err := os.MkdirAll(filepath.Dir(savePath), 0755); err != nil {
-		return err
+		return ResizeOutcomeReady, err
 	}
 
 	// 1. アップロードされたファイルをオリジナルとして無変換で保存する
 	if err := saveMultipartFile(file, originalSavePath); err != nil {
-		return err
+		return ResizeOutcomeReady, err
 	}
 
 	if resizedFile != nil {
 		// 2a. フロントエンドがリサイズ済み画像を送ってきた場合は、それをそのまま保存する
 		if err := saveMultipartFile(resizedFile, savePath); err != nil {
-			return err
+			return ResizeOutcomeReady, err
 		}
 
 		img, err := imaging.Open(savePath)
 		if err != nil {
-			return fmt.Errorf("failed to decode resized image: %w", err)
+			return ResizeOutcomeReady, fmt.Errorf("failed to decode resized image: %w", err)
 		}
 		bounds := img.Bounds()
 		if max(bounds.Dx(), bounds.Dy()) <= maxImageLongSide {
-			return nil
+			return ResizeOutcomeReady, nil
 		}
 
 		// フロント側のリサイズが不十分だった場合のフォールバック
 		img = resizeToMaxLongSide(img)
 		if err := imaging.Save(img, savePath, imaging.JPEGQuality(85)); err != nil {
-			return fmt.Errorf("failed to save resized image: %w", err)
+			return ResizeOutcomeReady, fmt.Errorf("failed to save resized image: %w", err)
 		}
-		return nil
+		return ResizeOutcomeReady, nil
 	}
 
-	// 2b. リサイズ済み画像が送られてこなかった場合のフォールバック: オリジナルから生成する
-	img, err := decodeWithFallback(originalSavePath, file.Filename)
+	// 2b. リサイズ済み画像が送られてこなかった場合: まず通常デコードのみを同期的に試す
+	// (heif-convert/exiftoolは決して同期実行しない。ここは常に高速)
+	img, err := imaging.Open(originalSavePath)
 	if err != nil {
-		return err
+		if needsFallbackConversion(file.Filename) {
+			// フロントのcreateImageBitmap/heic2anyもすでに失敗しているケース。
+			// heif-convert/exiftoolでの変換はHTTPリクエストをブロックしないよう非同期ジョブに委ねる。
+			return ResizeOutcomeNeedsFallback, nil
+		}
+		return ResizeOutcomeReady, fmt.Errorf("failed to decode image (unsupported format): %w", err)
 	}
 	img = resizeToMaxLongSide(img)
 	if err := imaging.Save(img, savePath, imaging.JPEGQuality(85)); err != nil {
-		return fmt.Errorf("failed to save resized image: %w", err)
+		return ResizeOutcomeReady, fmt.Errorf("failed to save resized image: %w", err)
 	}
-	return nil
+	return ResizeOutcomeReady, nil
 }
 
 func SaveAndAnalyze(database *gorm.DB, userID uuid.UUID, rot model.ImageUploadRequest, file *multipart.FileHeader, resizedFile *multipart.FileHeader) (*model.AiPhotograph, error) {
@@ -158,15 +176,21 @@ func SaveAndAnalyze(database *gorm.DB, userID uuid.UUID, rot model.ImageUploadRe
 	savePath := fmt.Sprintf("images/ai_photogrph/%s/%s", userID.String(), resizedFilename)
 	originalSavePath := fmt.Sprintf("images/ai_photogrph_original/%s/%s", userID.String(), originalFilename)
 
-	if err := saveOriginalAndResizedImage(file, resizedFile, originalSavePath, savePath); err != nil {
+	outcome, err := saveOriginalAndResizedImage(file, resizedFile, originalSavePath, savePath)
+	if err != nil {
 		return nil, err
+	}
+
+	conversionStatus := model.ConversionStatusReady
+	if outcome == ResizeOutcomeNeedsFallback {
+		conversionStatus = model.ConversionStatusProcessing
 	}
 
 	var photo *model.AiPhotograph
 	var targetConfigUUID uuid.UUID
 
 	// トランザクションでデータの整合性を100%保証する
-	err := database.Transaction(func(tx *gorm.DB) error {
+	err = database.Transaction(func(tx *gorm.DB) error {
 		parsedSessionID, err := uuid.Parse(rot.UploadSessionID)
 		// プロジェクト(箱)を作成
 		config, err := db.GetOrCreateConfig(tx, userID, rot.CourseID, rot.Title, parsedSessionID)
@@ -183,7 +207,7 @@ func SaveAndAnalyze(database *gorm.DB, userID uuid.UUID, rot model.ImageUploadRe
 		}
 
 		// 学習データを保存
-		photo, err = db.CreatePhotograph(tx, category.CategoryID, userID, savePath)
+		photo, err = db.CreatePhotograph(tx, category.CategoryID, userID, savePath, conversionStatus)
 		return err
 	})
 
@@ -192,12 +216,34 @@ func SaveAndAnalyze(database *gorm.DB, userID uuid.UUID, rot model.ImageUploadRe
 		return nil, err
 	}
 
-	// 画像評価キューに登録
-	worker.Scheduler.Enqueue(&worker.GPUJobRequest{
-		Kind:     worker.JobKindAnalysis,
-		Priority: worker.PriorityAnalysis,
-		PhotoID:  photo.ID,
-	})
+	if outcome == ResizeOutcomeNeedsFallback {
+		// heif-convert/exiftoolでの変換をHTTPリクエストの外側(バックグラウンド)で実行する。
+		// 画像評価キューへの投入は、リサイズ済み画像が実際に出来上がってから(成功時のみ)行う。
+		photoID := photo.ID
+		scheduleFallbackConversion(fallbackJob{
+			Database:         database,
+			OriginalPath:     originalSavePath,
+			OriginalFilename: file.Filename,
+			SavePath:         savePath,
+			UpdateStatus: func(tx *gorm.DB, status, errMsg string) error {
+				return db.UpdatePhotoConversionStatus(tx, photoID, status, errMsg)
+			},
+			OnSuccess: func() {
+				worker.Scheduler.Enqueue(&worker.GPUJobRequest{
+					Kind:     worker.JobKindAnalysis,
+					Priority: worker.PriorityAnalysis,
+					PhotoID:  photoID,
+				})
+			},
+		})
+	} else {
+		// 画像評価キューに登録
+		worker.Scheduler.Enqueue(&worker.GPUJobRequest{
+			Kind:     worker.JobKindAnalysis,
+			Priority: worker.PriorityAnalysis,
+			PhotoID:  photo.ID,
+		})
+	}
 
 	// AIカート作成
 
@@ -211,34 +257,38 @@ func SaveAndAnalyze(database *gorm.DB, userID uuid.UUID, rot model.ImageUploadRe
 	return photo, nil
 }
 
-func AICreation(database *gorm.DB, userId uuid.UUID, teacher bool, projectId uuid.UUID) (time.Time, error) {
+// 戻り値のint は、変換失敗(failed)のため学習対象から除外した画像の件数(表示用)。
+func AICreation(database *gorm.DB, userId uuid.UUID, teacher bool, projectId uuid.UUID) (time.Time, int, error) {
 	if teacher == false {
 		author, err := db.AuthorCheck(database, userId, projectId)
 		if err != nil {
 			log.Printf("[ERROR] AI作成の作成に失敗しました。: %v", err)
-			return time.Time{}, fmt.Errorf("AI作成の作成に失敗しました。: %w", err)
+			return time.Time{}, 0, fmt.Errorf("AI作成の作成に失敗しました。: %w", err)
 		}
 		if !author {
 			log.Printf("[ERROR] AI作成の作成権限が有りません。: %v", err)
-			return time.Time{}, fmt.Errorf("AI作成の作成権限が有りません。: %w", err)
+			return time.Time{}, 0, fmt.Errorf("AI作成の作成権限が有りません。: %w", err)
 		}
 	}
 	// ステータスを確認して作成中ではないかチェック
 	status, sttime, err := db.AIGenerationStatus(database, projectId)
 	if err != nil {
 		log.Printf("[ERROR] AI作成の作成に失敗しました。: %v", err)
-		return time.Time{}, fmt.Errorf("AI作成の作成に失敗しました。: %w", err)
+		return time.Time{}, 0, fmt.Errorf("AI作成の作成に失敗しました。: %w", err)
 	}
 	if !status {
 		log.Printf("[WARN] すでにAIを作成中です。プロジェクトID: %s, 開始時間: %v", projectId, sttime)
-		return sttime, fmt.Errorf("現在AIを作成中です（開始時間: %s）。しばらくお待ちください", sttime)
+		return sttime, 0, fmt.Errorf("現在AIを作成中です（開始時間: %s）。しばらくお待ちください", sttime)
 	}
 
 	// ─── ここからAI作成用の処理 ───
-	trainingJob, err := db.CreateTrainingJobWithSnapshot(database, projectId)
+	trainingJob, excludedFailedCount, err := db.CreateTrainingJobWithSnapshot(database, projectId)
 	if err != nil {
 		log.Printf("[ERROR] 学習ジョブの作成に失敗: %v", err)
-		return time.Time{}, fmt.Errorf("学習データのまとめ処理に失敗しました: %w", err)
+		return time.Time{}, 0, fmt.Errorf("学習データのまとめ処理に失敗しました: %w", err)
+	}
+	if excludedFailedCount > 0 {
+		log.Printf("[WARN] 変換失敗により%d件の画像を学習対象から除外しました。ProjectID: %s", excludedFailedCount, projectId)
 	}
 	// AI作成キューへJob IDを投入（GPUは1系統のためテスト・分析と同じスケジューラで直列化する）
 	worker.Scheduler.Enqueue(&worker.GPUJobRequest{
@@ -248,5 +298,5 @@ func AICreation(database *gorm.DB, userId uuid.UUID, teacher bool, projectId uui
 	})
 
 	log.Printf("[INFO] AI作成ジョブをキューに登録しました。JobID: %d", trainingJob.ID)
-	return time.Time{}, nil
+	return time.Time{}, excludedFailedCount, nil
 }

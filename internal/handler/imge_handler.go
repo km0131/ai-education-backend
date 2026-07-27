@@ -98,6 +98,7 @@ func (h *Handler) ImageUpdated(c *gin.Context) {
 
 	c.JSON(http.StatusCreated, gin.H{
 		"status": "完了",
+		"photo":  photo,
 	})
 }
 

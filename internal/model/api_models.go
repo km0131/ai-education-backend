@@ -133,6 +133,21 @@ type TestLabelsResponse struct {
 	Labels []string `json:"labels"`
 }
 
+// HEIC/RAWのバックグラウンド変換状況をまとめて問い合わせるためのリクエスト/レスポンス
+type ConversionStatusRequest struct {
+	PhotoIDs []uint `json:"photo_ids" binding:"required"`
+}
+
+type ConversionStatusEntry struct {
+	PhotoID uint   `json:"photo_id"`
+	Status  string `json:"status"` // ready / processing / failed
+	Error   string `json:"error,omitempty"`
+}
+
+type ConversionStatusResponse struct {
+	Statuses []ConversionStatusEntry `json:"statuses"`
+}
+
 type LabelMappingInput struct {
 	StudentLabelName string `json:"student_label_name" binding:"required"`
 	TeacherLabelName string `json:"teacher_label_name"` // 空白を許容する場合はbindingを外す

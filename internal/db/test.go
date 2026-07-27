@@ -41,16 +41,18 @@ func TestDataCheck(db *gorm.DB, courseID uint, batchID uuid.UUID) (bool, error) 
 }
 
 // テスト画像保存用DB
-func CreatingTestDatasetDB(db *gorm.DB, courseID uint, imageURL string, batchID uuid.UUID, correctLabelName string) error {
+// conversionStatusは、フロントで既にリサイズ済みJPEGが揃っている通常時はConversionStatusReady、
+// HEIC/RAWのバックエンドフォールバック変換が非同期で必要な場合はConversionStatusProcessingを渡す。
+func CreatingTestDatasetDB(db *gorm.DB, courseID uint, imageURL string, batchID uuid.UUID, correctLabelName string, conversionStatus string) (*model.TestImage, error) {
+	testImage := model.TestImage{
+		CourseID:         courseID,
+		ImageURL:         imageURL,
+		BatchID:          batchID,
+		CorrectLabelName: correctLabelName,
+		ConversionStatus: conversionStatus,
+	}
 	// トランザクション処理の開始
 	err := db.Transaction(func(tx *gorm.DB) error {
-		// 挿入するデータの構造体を組み立てる
-		testImage := model.TestImage{
-			CourseID:         courseID,
-			ImageURL:         imageURL,
-			BatchID:          batchID,
-			CorrectLabelName: correctLabelName,
-		}
 		// DBにレコードを追加
 		if err := tx.Create(&testImage).Error; err != nil {
 			// エラーを返すと自動的にロールバックされます
@@ -58,7 +60,33 @@ func CreatingTestDatasetDB(db *gorm.DB, courseID uint, imageURL string, batchID 
 		}
 		return nil
 	})
-	return err
+	return &testImage, err
+}
+
+// UpdateTestImageConversionStatus: バックグラウンドのHEIC/RAWフォールバック変換の結果をDBへ反映する。
+func UpdateTestImageConversionStatus(db *gorm.DB, testImageID uint, status string, errMsg string) error {
+	return db.Model(&model.TestImage{}).Where("id = ?", testImageID).Updates(map[string]interface{}{
+		"conversion_status": status,
+		"conversion_error":  errMsg,
+	}).Error
+}
+
+// GetTestImageConversionStatuses: 指定した画像IDの変換状況をまとめて取得する
+func GetTestImageConversionStatuses(db *gorm.DB, testImageIDs []uint) ([]model.ConversionStatusEntry, error) {
+	var images []model.TestImage
+	if err := db.Where("id IN ?", testImageIDs).Find(&images).Error; err != nil {
+		return nil, err
+	}
+
+	statuses := make([]model.ConversionStatusEntry, 0, len(images))
+	for _, img := range images {
+		statuses = append(statuses, model.ConversionStatusEntry{
+			PhotoID: img.ID,
+			Status:  img.ConversionStatus,
+			Error:   img.ConversionError,
+		})
+	}
+	return statuses, nil
 }
 
 type TestImageResponse struct {
@@ -295,6 +323,17 @@ func GetModelPathsByTrainingJob(db *gorm.DB, trainingJobID uuid.UUID) (*model.Ai
 func TestStatusDB(db *gorm.DB, id uint) error {
 	err := db.Model(&model.StudentTestJob{}).Where("id = ?", id).Update("status", "running").Error
 	return err
+}
+
+// MarkTestJobFailed は、Pythonへ到達する前(ZIP作成失敗やAPIリクエスト自体の失敗)にワーカー側で
+// テスト実行が止まった場合に、StudentTestJobをfailedへ更新する。
+// これが無いと、Pythonからのコールバック(SaveTestResultDB)が呼ばれないままrunningに残り続け、
+// UpTestStatusのrunningチェックにより以降のテスト実行が永久にブロックされてしまう。
+func MarkTestJobFailed(db *gorm.DB, id uint, errMsg string) error {
+	return db.Model(&model.StudentTestJob{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"status":        "failed",
+		"error_message": errMsg,
+	}).Error
 }
 
 // SaveTestResultDB はPythonからのテスト結果コールバックを保存します

@@ -46,6 +46,32 @@ func (h *Handler) UploadImage(c *gin.Context) {
 	c.JSON(http.StatusCreated, photo)
 }
 
+// PhotoStatus: フロントでcreateImageBitmap/heic2anyがどちらも変換できなかった画像について、
+// バックエンドのheif-convert/exiftoolによるバックグラウンド変換(非同期)の進行状況をまとめて返す。
+// UploadImage/ImageUpdatedのレスポンスがconversion_status="processing"の場合、フロントはこの
+// エンドポイントをポーリングして完了(ready)または失敗(failed)を確認する。
+func (h *Handler) PhotoStatus(c *gin.Context) {
+	userId, ok := utils.GetUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "認証エラー"})
+		return
+	}
+	var req model.ConversionStatusRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "photo_idsは必須です"})
+		return
+	}
+
+	statuses, err := db.GetPhotographConversionStatuses(h.DB, userId, req.PhotoIDs)
+	if err != nil {
+		log.Printf("[ERROR] PhotoStatus failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "変換状況の取得に失敗しました"})
+		return
+	}
+
+	c.JSON(http.StatusOK, model.ConversionStatusResponse{Statuses: statuses})
+}
+
 // Ai作成のカードを送信
 func (h *Handler) AiCard(c *gin.Context) {
 	userId, ok := utils.GetUserID(c) // APIのトークンを検証
@@ -96,7 +122,7 @@ func (h *Handler) AiCreation(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "プロジェクトIDが必要です"})
 		return
 	}
-	createdAt, err := service.AICreation(h.DB, userId, isTeacher, req.ProjectId)
+	createdAt, excludedFailedCount, err := service.AICreation(h.DB, userId, isTeacher, req.ProjectId)
 
 	// 【すでに作成中のケース】時間が返ってきている場合
 	if !createdAt.IsZero() {
@@ -116,8 +142,9 @@ func (h *Handler) AiCreation(c *gin.Context) {
 
 	//【正常終了のケース】エラーもなく、重複もない場合
 	c.JSON(http.StatusOK, gin.H{
-		"message":    "AIの作成処理を開始しました。",
-		"aicreation": createdAt,
+		"message":               "AIの作成処理を開始しました。",
+		"aicreation":            createdAt,
+		"excluded_failed_count": excludedFailedCount,
 	})
 
 }

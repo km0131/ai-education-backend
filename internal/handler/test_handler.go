@@ -36,12 +36,43 @@ func (h *Handler) UploadingTestImage(c *gin.Context) {
 	}
 	// フロントエンドで長辺512px以下にリサイズ済みの画像(任意。無ければサーバー側でリサイズする)
 	resizedFile, _ := c.FormFile("resized_file")
-	err = service.CreatingTestDataset(h.DB, req, file, resizedFile)
+	testImage, err := service.CreatingTestDataset(h.DB, req, file, resizedFile)
 	if err != nil {
 		log.Printf("[Error] テスト画像の登録に失敗: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "テストデータの保存に失敗しました", "filename": file.Filename})
 		return
 	}
+
+	c.JSON(http.StatusCreated, testImage)
+}
+
+// TestPhotoStatus: フロントでcreateImageBitmap/heic2anyがどちらも変換できなかったテスト画像について、
+// バックエンドのheif-convert/exiftoolによるバックグラウンド変換(非同期)の進行状況をまとめて返す。
+func (h *Handler) TestPhotoStatus(c *gin.Context) {
+	isTeacher, ok := utils.GetUserTeacher(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "認証情報の取得または型変換に失敗しました"})
+		return
+	}
+	if isTeacher == false {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "先生以外は取得出来ません"})
+		return
+	}
+
+	var req model.ConversionStatusRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "photo_idsは必須です"})
+		return
+	}
+
+	statuses, err := db.GetTestImageConversionStatuses(h.DB, req.PhotoIDs)
+	if err != nil {
+		log.Printf("[Error] TestPhotoStatus failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "変換状況の取得に失敗しました"})
+		return
+	}
+
+	c.JSON(http.StatusOK, model.ConversionStatusResponse{Statuses: statuses})
 }
 
 // テスト画像を取得
@@ -132,6 +163,48 @@ func (h *Handler) GetTestLabel(c *gin.Context) {
 
 	labels, err := db.GetTestLabelDB(h.DB, req.CourseID)
 
+	if err != nil {
+		log.Printf("[Error] リストの取得に失敗しました: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "リストの取得に失敗しました"})
+		return
+	}
+
+	c.JSON(http.StatusOK, model.TestLabelsResponse{
+		Labels: labels,
+	})
+}
+
+// GetTestLabelOptions: 生徒がラベル紐づけ(up_test_label_map)の選択肢を表示するための、
+// 先生が設定した正解ラベル一覧を返す(読み取り専用)。GetTestLabelはテストデータ管理用の
+// 先生専用エンドポイントのため、生徒の選択肢表示にはこちらを使う。
+func (h *Handler) GetTestLabelOptions(c *gin.Context) {
+	userId, ok := utils.GetUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "認証情報の取得または型変換に失敗しました"})
+		return
+	}
+
+	type GetLabel struct {
+		CourseID uint `form:"course_id" json:"course_id"`
+	}
+	var req GetLabel
+	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Printf("[Error] ラベルIDのパース失敗: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "無効なリクエストです"})
+		return
+	}
+
+	isJoined, err := db.IsStudentInCourse(h.DB, userId, req.CourseID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "DBエラー"})
+		return
+	}
+	if !isJoined {
+		c.JSON(http.StatusForbidden, gin.H{"error": "このクラスには参加していません"})
+		return
+	}
+
+	labels, err := db.GetTestLabelDB(h.DB, req.CourseID)
 	if err != nil {
 		log.Printf("[Error] リストの取得に失敗しました: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "リストの取得に失敗しました"})

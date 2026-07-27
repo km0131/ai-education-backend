@@ -147,6 +147,16 @@ type AiCategory struct {
 	Photographs []AiPhotograph `gorm:"foreignKey:CategoryID;references:CategoryID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE;"`
 }
 
+// ConversionStatus: フロント(createImageBitmap/heic2any)のどちらでも変換できなかった
+// HEIC/RAWファイルを、バックエンドがheif-convert/exiftoolで非同期に変換する際の進行状況。
+// Ready: リサイズ済み画像がそのまま使用可能(通常はこれ) / Processing: バックグラウンド変換中
+// / Failed: バックグラウンド変換が失敗(ConversionErrorに理由が入る)
+const (
+	ConversionStatusReady      = "ready"
+	ConversionStatusProcessing = "processing"
+	ConversionStatusFailed     = "failed"
+)
+
 // AiPhotograph: 学習データの最小単位
 type AiPhotograph struct {
 	gorm.Model // id (bigint) は自動生成される
@@ -155,6 +165,10 @@ type AiPhotograph struct {
 	StudentID      uuid.UUID `gorm:"type:uuid;not null;index"`
 	PhotographPath string    `gorm:"not null"`
 	IsAnalyzed     bool      `gorm:"default:false"`
+
+	// HEIC/RAWフォールバック変換(heif-convert/exiftool)の進行状況。既定はReady(同期処理で完結)。
+	ConversionStatus string `gorm:"type:varchar(20);not null;default:'ready';index"`
+	ConversionError  string `gorm:"type:text"`
 
 	Saturation      float64    `gorm:"type:float"`
 	Brightness      float64    `gorm:"type:float"`
@@ -196,6 +210,10 @@ type TestImage struct {
 	BatchID          uuid.UUID `gorm:"not null;type:varchar(191);index;"` //編集や送信時の識別
 	ImageURL         string    `gorm:"not null;type:text"`                // 画像の配信URL/パス
 	CorrectLabelName string    `gorm:"not null;type:varchar(50);index"`   // 先生が追加・選択したラベル名
+
+	// HEIC/RAWフォールバック変換(heif-convert/exiftool)の進行状況。既定はReady(同期処理で完結)。
+	ConversionStatus string `gorm:"type:varchar(20);not null;default:'ready';index"`
+	ConversionError  string `gorm:"type:text"`
 }
 
 // StudentTestMapping: 先生のラベルと生徒のラベルの対応表（中間テーブル）

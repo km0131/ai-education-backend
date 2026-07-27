@@ -98,6 +98,7 @@ func main() {
 				aiGroup.POST("/delete_image", h.DeleteImage)
 				aiGroup.POST("/up_label", h.UpLabel)
 				aiGroup.POST("/ai_model", h.AiModel)
+				aiGroup.POST("/photo_status", h.PhotoStatus)
 			}
 			testGroup := authGroup.Group("/test")
 			testGroup.Use(utils.AuthMiddleware(h.DB))
@@ -106,10 +107,12 @@ func main() {
 				testGroup.POST("/get_images", h.GetImage)
 				testGroup.POST("/delete_tsst_image", h.DeleteTestImage)
 				testGroup.POST("/get_test_label", h.GetTestLabel)
+				testGroup.POST("/get_test_label_options", h.GetTestLabelOptions)
 				testGroup.POST("/up_test_label", h.UpTestLabel)
 				testGroup.POST("/get_test_label_map", h.GetTestLabelMap)
 				testGroup.POST("/up_test_label_map", h.UpStudentTestLabel)
 				testGroup.POST("/execution", h.TestExecution)
+				testGroup.POST("/photo_status", h.TestPhotoStatus)
 			}
 			resultGroup := authGroup.Group("/result")
 			resultGroup.Use(utils.AuthMiddleware(h.DB))

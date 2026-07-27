@@ -15,7 +15,7 @@ import (
 )
 
 // テスト画像の登録
-func CreatingTestDataset(data *gorm.DB, res model.ImageUploadResponse, file *multipart.FileHeader, resizedFile *multipart.FileHeader) error {
+func CreatingTestDataset(data *gorm.DB, res model.ImageUploadResponse, file *multipart.FileHeader, resizedFile *multipart.FileHeader) (*model.TestImage, error) {
 	// ファイル名生成(リサイズ版とオリジナル版で同じUUIDを共有し、拡張子だけ変える)
 	baseName := uuid.New().String()
 	originalFilename := baseName + filepath.Ext(file.Filename)
@@ -25,30 +25,50 @@ func CreatingTestDataset(data *gorm.DB, res model.ImageUploadResponse, file *mul
 	savePath := fmt.Sprintf("images/test_photogrph/%d/%s", res.CourseID, resizedFilename)
 	originalSavePath := fmt.Sprintf("images/test_photogrph_original/%d/%s", res.CourseID, originalFilename)
 
-	if err := saveOriginalAndResizedImage(file, resizedFile, originalSavePath, savePath); err != nil {
-		return err
+	outcome, err := saveOriginalAndResizedImage(file, resizedFile, originalSavePath, savePath)
+	if err != nil {
+		return nil, err
 	}
 
 	batchID, err := uuid.Parse(res.BatchID)
 	if err != nil {
 		log.Printf("invalid batch_id: %q", res.BatchID)
-		return err
+		return nil, err
 	}
 
 	flag, err := db.TestDataCheck(data, res.CourseID, batchID)
 
 	if flag == false {
 		log.Printf("[ERROR] すでに登録されているので登録出来ません。: %v", err)
-		return err
+		return nil, err
 	}
 
-	err = db.CreatingTestDatasetDB(data, res.CourseID, savePath, batchID, res.CorrectLabelName)
+	conversionStatus := model.ConversionStatusReady
+	if outcome == ResizeOutcomeNeedsFallback {
+		conversionStatus = model.ConversionStatusProcessing
+	}
+
+	testImage, err := db.CreatingTestDatasetDB(data, res.CourseID, savePath, batchID, res.CorrectLabelName, conversionStatus)
 	if err != nil {
 		log.Printf("[ERROR] テスト画像の登録に失敗: %v", err)
-		return err
+		return nil, err
 	}
 
-	return nil
+	if outcome == ResizeOutcomeNeedsFallback {
+		// heif-convert/exiftoolでの変換をHTTPリクエストの外側(バックグラウンド)で実行する
+		testImageID := testImage.ID
+		scheduleFallbackConversion(fallbackJob{
+			Database:         data,
+			OriginalPath:     originalSavePath,
+			OriginalFilename: file.Filename,
+			SavePath:         savePath,
+			UpdateStatus: func(tx *gorm.DB, status, errMsg string) error {
+				return db.UpdateTestImageConversionStatus(tx, testImageID, status, errMsg)
+			},
+		})
+	}
+
+	return testImage, nil
 }
 
 func TestExecutionService(data *gorm.DB, projectId uuid.UUID, courseID uint, isTeacher bool, userId uuid.UUID) (time.Time, error) {

@@ -135,10 +135,16 @@ func handleTestJob(database *gorm.DB, job *GPUJobRequest) {
 	zipPath, err := TestExecutionWorker(database, int(job.StatusID), job.ProjectID, job.CourseID)
 	if err != nil {
 		log.Printf("[WORKER-ERROR] ❌ テスト用ZIPの作成に失敗 (StatusID: %d): %v", job.StatusID, err)
+		if updErr := db.MarkTestJobFailed(database, job.StatusID, err.Error()); updErr != nil {
+			log.Printf("[WORKER-ERROR] ❌ テストステータスのfailed更新に失敗 (StatusID: %d): %v", job.StatusID, updErr)
+		}
 		return
 	}
 	if err := api.SendTestZipToPython(job.StatusID, zipPath); err != nil {
 		log.Printf("[WORKER-ERROR] ❌ Python APIへのテスト実行リクエストが失敗 (StatusID: %d): %v", job.StatusID, err)
+		if updErr := db.MarkTestJobFailed(database, job.StatusID, err.Error()); updErr != nil {
+			log.Printf("[WORKER-ERROR] ❌ テストステータスのfailed更新に失敗 (StatusID: %d): %v", job.StatusID, updErr)
+		}
 	}
 }
 
