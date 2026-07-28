@@ -72,6 +72,10 @@ func CreatingTestDataset(data *gorm.DB, res model.ImageUploadResponse, file *mul
 }
 
 func TestExecutionService(data *gorm.DB, projectId uuid.UUID, courseID uint, isTeacher bool, userId uuid.UUID) (time.Time, error) {
+	if err := checkAiCreationNotBlocked(data, courseID); err != nil {
+		return time.Time{}, err
+	}
+
 	if isTeacher == false {
 		author, err := db.AuthorCheck(data, userId, projectId)
 		if err != nil {

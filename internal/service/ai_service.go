@@ -259,6 +259,17 @@ func SaveAndAnalyze(database *gorm.DB, userID uuid.UUID, rot model.ImageUploadRe
 
 // 戻り値のint は、変換失敗(failed)のため学習対象から除外した画像の件数(表示用)。
 func AICreation(database *gorm.DB, userId uuid.UUID, teacher bool, projectId uuid.UUID) (time.Time, int, error) {
+	// AiCreationのリクエストはproject_idしか持たないため、クラス単位のブロック判定用に
+	// CourseIDを逆引きしてから、実際の処理を始める前にブロック状態を確認する。
+	courseID, err := db.GetCourseIDByProject(database, projectId)
+	if err != nil {
+		log.Printf("[ERROR] プロジェクトからクラスIDの取得に失敗しました。: %v", err)
+		return time.Time{}, 0, fmt.Errorf("プロジェクト情報の取得に失敗しました: %w", err)
+	}
+	if err := checkAiCreationNotBlocked(database, courseID); err != nil {
+		return time.Time{}, 0, err
+	}
+
 	if teacher == false {
 		author, err := db.AuthorCheck(database, userId, projectId)
 		if err != nil {

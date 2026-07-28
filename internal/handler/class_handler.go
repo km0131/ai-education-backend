@@ -134,6 +134,63 @@ func (h *Handler) JoinClass(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "クラスに参加しました！"})
 }
 
+// AiCreationBlockStatus: 指定クラスでAIの新規作成/学習開始/性能テストがブロックされているかを返す。
+// 先生・生徒どちらのロールからも呼べる(教師停止中であることを生徒側にも伝えるため)。
+func (h *Handler) AiCreationBlockStatus(c *gin.Context) {
+	_, ok := utils.GetUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "認証情報の取得または型変換に失敗しました"})
+		return
+	}
+
+	var req struct {
+		CourseID uint `json:"course_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "コースIDは必須です"})
+		return
+	}
+
+	blocked, err := db.IsAiCreationBlocked(h.DB, req.CourseID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "クラスが見つかりません"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"ai_creation_blocked": blocked})
+}
+
+// SetAiCreationBlockStatus: AIの新規作成/学習開始/性能テストのブロック状態を切り替える。
+// 先生のみ、かつ自分が作成したクラスに対してのみ実行できる(生徒は403で弾く)。
+func (h *Handler) SetAiCreationBlockStatus(c *gin.Context) {
+	isTeacher, ok := utils.GetUserTeacher(c)
+	userId, ok1 := utils.GetUserID(c)
+	if !ok || !ok1 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "認証情報の取得または型変換に失敗しました"})
+		return
+	}
+	if !isTeacher {
+		c.JSON(http.StatusForbidden, gin.H{"error": "先生以外はこの操作を行えません"})
+		return
+	}
+
+	var req struct {
+		CourseID uint `json:"course_id" binding:"required"`
+		Blocked  bool `json:"blocked"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "コースIDは必須です"})
+		return
+	}
+
+	if err := db.SetAiCreationBlocked(h.DB, req.CourseID, userId, req.Blocked); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "このクラスを操作する権限がないか、クラスが存在しません"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"ai_creation_blocked": req.Blocked})
+}
+
 // クラス名取得
 func (h *Handler) RemoveClass(c *gin.Context) {
 	classID := c.Param("id")

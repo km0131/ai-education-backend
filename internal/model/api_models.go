@@ -43,14 +43,15 @@ type CreateClassOutput struct {
 
 // クラス送信用
 type ClassSend struct {
-	Id           string    `json:"id"`
-	Title        string    `json:"title"`
-	Description  string    `json:"description"`
-	TeacherName  string    `json:"teacher_name"`
-	StudentCount int       `json:"student_count"`
-	InviteCode   string    `json:"invite_code"`
-	ThemeColor   string    `json:"theme_color"`
-	UpdataTime   time.Time `json:"updata_time"`
+	Id                string    `json:"id"`
+	Title             string    `json:"title"`
+	Description       string    `json:"description"`
+	TeacherName       string    `json:"teacher_name"`
+	StudentCount      int       `json:"student_count"`
+	InviteCode        string    `json:"invite_code"`
+	ThemeColor        string    `json:"theme_color"`
+	UpdataTime        time.Time `json:"updata_time"`
+	AiCreationBlocked bool      `json:"ai_creation_blocked"`
 }
 
 // 画像アップロード時のリクエスト構造体（multipart用とは別にJSONとして扱う場合）

@@ -65,6 +65,17 @@ func GetOrCreateConfig(tx *gorm.DB, userID uuid.UUID, courseID uint, title strin
 	return config, nil
 }
 
+// GetCourseIDByProject: プロジェクトUUIDから所属クラスID(CourseID)を取得する。
+// AiCreation(学習開始)のリクエストはproject_idしか受け取らないため、AI作成ブロック確認の
+// クラス単位判定に必要なCourseIDをここで逆引きする。
+func GetCourseIDByProject(database *gorm.DB, projectID uuid.UUID) (uint, error) {
+	var config model.AiConfiguration
+	if err := database.Select("course_id").Where("project_uuid = ?", projectID).First(&config).Error; err != nil {
+		return 0, err
+	}
+	return config.CourseID, nil
+}
+
 // CreateCategoryWithHistory: ラベル情報の履歴管理付き作成
 func CreateCategoryWithHistory(tx *gorm.DB, configID uuid.UUID, index int, title string) (*model.AiCategory, error) {
 	// UUIDの生成

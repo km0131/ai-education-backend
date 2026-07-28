@@ -150,6 +150,32 @@ func CreateCourse(tx *gorm.DB, title string, description string, teacherID uuid.
 	return nil, fmt.Errorf("招待コードの生成に失敗しました（再試行上限に達しました）")
 }
 
+// IsAiCreationBlocked: 指定クラスでAI新規作成/学習開始/性能テストがブロックされているかを取得する。
+// 全ロール(先生・生徒)から呼ばれる想定。
+func IsAiCreationBlocked(db *gorm.DB, courseID uint) (bool, error) {
+	var course model.Course
+	if err := db.Select("ai_creation_blocked").Where("id = ?", courseID).First(&course).Error; err != nil {
+		return false, err
+	}
+	return course.AiCreationBlocked, nil
+}
+
+// SetAiCreationBlocked: クラスのブロック状態を切り替える。
+// WHERE句にteacher_idも含めることで「クラスの作成者本人か」の所有権チェックと更新を1クエリで
+// アトミックに行う(他の先生のクラスを誤って更新しない)。RowsAffected==0なら権限なしか対象なし。
+func SetAiCreationBlocked(db *gorm.DB, courseID uint, teacherID uuid.UUID, blocked bool) error {
+	result := db.Model(&model.Course{}).
+		Where("id = ? AND teacher_id = ?", courseID, teacherID).
+		Update("ai_creation_blocked", blocked)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return errors.New("unauthorized_or_not_found")
+	}
+	return nil
+}
+
 // GetClassDetailsForUser は指定された classID の詳細を取得します。
 func GetClassDetailsForUser(db *gorm.DB, classID string, userID uuid.UUID) (*model.ClassSend, error) {
 	var result model.ClassSend
@@ -164,6 +190,7 @@ func GetClassDetailsForUser(db *gorm.DB, classID string, userID uuid.UUID) (*mod
 			courses.invite_code AS invite_code,
 			courses.theme_color AS theme_color,
 			courses.updated_at AS updata_time,
+			courses.ai_creation_blocked AS ai_creation_blocked,
 			(SELECT COUNT(*) FROM course_enrollments WHERE course_enrollments.course_id = courses.id AND course_enrollments.deleted_at IS NULL) AS student_count
 		`).
 		Joins("JOIN users ON users.id = courses.teacher_id"). // 先生の名前取得用

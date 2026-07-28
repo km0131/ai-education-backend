@@ -5,6 +5,7 @@ import (
 	"ai-education/backend/internal/model"
 	"ai-education/backend/internal/service"
 	"ai-education/backend/internal/utils"
+	"errors"
 	"log"
 	"net/http"
 
@@ -325,6 +326,11 @@ func (h *Handler) TestExecution(c *gin.Context) {
 	}
 	testTime, err := service.TestExecutionService(h.DB, req.ProjectUUID, req.CourseID, isTeacher, userId)
 	if err != nil {
+		if errors.Is(err, service.ErrAiCreationBlocked) {
+			log.Printf("[INFO] このクラスはAI作成/テストがブロックされています。CourseID: %d", req.CourseID)
+			c.JSON(http.StatusLocked, gin.H{"error": err.Error()})
+			return
+		}
 		if !testTime.IsZero() {
 			log.Printf("[INFO] 現在テスト実行中です。開始時間: %v", testTime)
 			c.JSON(http.StatusBadRequest, gin.H{

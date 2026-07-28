@@ -82,6 +82,10 @@ type Course struct {
 	TeacherID   uuid.UUID `gorm:"type:uuid;not null;index"`
 	Teacher     User      `gorm:"foreignKey:TeacherID;references:ID"`
 	ThemeColor  string
+
+	// 先生がこのクラスでのAI新規作成/学習開始/性能テストを一時的に停止しているかどうか。
+	// クラス単位で管理する(グローバルなON/OFFではない)。
+	AiCreationBlocked bool `gorm:"not null;default:false"`
 }
 
 // 生徒とクラスを結ぶリレーションテーブル

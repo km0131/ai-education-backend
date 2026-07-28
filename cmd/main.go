@@ -99,6 +99,8 @@ func main() {
 				aiGroup.POST("/up_label", h.UpLabel)
 				aiGroup.POST("/ai_model", h.AiModel)
 				aiGroup.POST("/photo_status", h.PhotoStatus)
+				aiGroup.POST("/block_status", h.AiCreationBlockStatus)
+				aiGroup.POST("/block_toggle", h.SetAiCreationBlockStatus)
 			}
 			testGroup := authGroup.Group("/test")
 			testGroup.Use(utils.AuthMiddleware(h.DB))

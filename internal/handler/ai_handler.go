@@ -5,6 +5,7 @@ import (
 	"ai-education/backend/internal/model"
 	"ai-education/backend/internal/service"
 	"ai-education/backend/internal/utils"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -131,6 +132,12 @@ func (h *Handler) AiCreation(c *gin.Context) {
 			"error": "すでにAIを作成中です。",
 			"time":  createdAtJST.Format("2006-01-02 15:04"),
 		})
+		return
+	}
+
+	// 【先生がこのクラスのAI作成/学習をブロックしているケース】
+	if errors.Is(err, service.ErrAiCreationBlocked) {
+		c.JSON(http.StatusLocked, gin.H{"error": err.Error()})
 		return
 	}
 
