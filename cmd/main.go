@@ -72,7 +72,7 @@ func main() {
 		v0.POST("/login_registrer", h.PostLoginRegistrer)
 		v0.POST("/login_qr", h.PostLoginQR)
 	}
-
+	// 画像分類AI
 	v1 := r.Group("/api/v1")
 	{
 		// main関数の中のインライン定義ではなく、上で定義した関数を使う
@@ -123,6 +123,20 @@ func main() {
 				resultGroup.POST("/test_results", h.TestResults)
 				resultGroup.POST("/test_results_imge", h.TestResultsImge)
 				resultGroup.POST("/image_evaluation_get", h.ImageEvaluationGet)
+
+			}
+		}
+	}
+	// 中高生向けプログラム作成機能
+	v2 := r.Group("/api/v2")
+	{
+		v2.GET("/ping", PingHandler)
+		authGroup := v2.Group("/")
+		authGroup.Use(utils.AuthMiddleware(h.DB))
+		{
+			prGroup := authGroup.Group("/program")
+			prGroup.Use(utils.AuthMiddleware(h.DB))
+			{
 
 			}
 		}

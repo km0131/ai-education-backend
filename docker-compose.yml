@@ -1,7 +1,4 @@
-version: '3.8'
-
 services:
-  # --- PostgreSQL ---
   db:
     image: docker.io/library/postgres:17-alpine
     networks:
@@ -24,10 +21,9 @@ services:
       retries: 5
       start_period: 60s
 
-  # --- Go バックエンド API ---
   backend:
     build:
-      context: .  # ディレクトリ構造に合わせて調整してください（リポジトリ直下なら .）
+      context: .
       dockerfile: Dockerfile
     networks:
       - ai-net
@@ -48,9 +44,8 @@ services:
       - PYTHON_TEST_URL=${PYTHON_TEST_URL}
       - PYTHON_REDUCE_DIVERSITY_API_URL=${PYTHON_REDUCE_DIVERSITY_API_URL}
     volumes:
-      # ${PWD}/images が存在することを確認してください
-      - ./images:/app/images:Z
-      - .:/app:Z
+      - ./images:/app/images
+      - ./storage:/app/storage
     depends_on:
       db:
         condition: service_healthy
@@ -61,7 +56,6 @@ services:
       retries: 5
       start_period: 300s
 
-  # --- SurrealDB ---
   surrealdb:
     image: docker.io/surrealdb/surrealdb:latest
     networks:
@@ -77,16 +71,14 @@ services:
       timeout: 5s
       retries: 5
 
-  # --- バックエンド評価 (必要に応じて残す) ---
   backend-lint:
     image: alpine:latest
     volumes:
-      - .:/app:Z
+      - .:/app
     working_dir: /app
-    # コンテナ起動時に go を入れて、そのまま fmt と vet を実行する
     command: ["sh", "-c", "apk add --no-cache go && go fmt ./... && go vet ./..."]
 
 networks:
   ai-net:
-    name: ai-net  # 外部から明示的な名前で参照できるように固定
+    name: ai-net
     driver: bridge
