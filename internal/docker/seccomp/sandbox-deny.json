@@ -1,0 +1,82 @@
+{
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "architectures": [
+    "SCMP_ARCH_AARCH64",
+    "SCMP_ARCH_ARM",
+    "SCMP_ARCH_X86_64",
+    "SCMP_ARCH_X86",
+    "SCMP_ARCH_X32"
+  ],
+  "syscalls": [
+    {
+      "names": ["ptrace", "process_vm_readv", "process_vm_writev"],
+      "action": "SCMP_ACT_ERRNO",
+      "comment": "他プロセスのメモリ読み書き・トレース。cap-drop=ALLでCAP_SYS_PTRACEは既に無いが、seccomp層でも明示的に遮断する(多層防御、NextPlan.md 3.5)"
+    },
+    {
+      "names": ["mount", "umount", "umount2", "pivot_root"],
+      "action": "SCMP_ACT_ERRNO",
+      "comment": "マウント操作。ディスククォータはホスト側の事前プロビジョニング済みループバックプールをbind mountするだけで、コンテナ内からのmount/umountは一切不要(scripts/setup-sandbox-pool.sh参照)"
+    },
+    {
+      "names": ["kexec_load", "kexec_file_load"],
+      "action": "SCMP_ACT_ERRNO",
+      "comment": "新しいカーネルのロード・起動。ホスト乗っ取りに直結するため遮断"
+    },
+    {
+      "names": ["init_module", "finit_module", "delete_module", "create_module", "query_module", "get_kernel_syms"],
+      "action": "SCMP_ACT_ERRNO",
+      "comment": "カーネルモジュールのロード・アンロード・情報取得"
+    },
+    {
+      "names": ["acct", "reboot", "swapon", "swapoff", "sysfs", "_sysctl", "quotactl", "nfsservctl"],
+      "action": "SCMP_ACT_ERRNO",
+      "comment": "ホスト全体の状態(電源・スワップ・アカウンティング・fsクォータ)を変更する操作"
+    },
+    {
+      "names": ["unshare", "setns"],
+      "action": "SCMP_ACT_ERRNO",
+      "comment": "名前空間の作成・参加。gVisor(runsc)の隔離を前提としており、コンテナ内から追加の名前空間操作は不要"
+    },
+    {
+      "names": ["keyctl", "add_key", "request_key"],
+      "action": "SCMP_ACT_ERRNO",
+      "comment": "カーネルキーリング操作(生徒コードが到達する必要のない領域)"
+    },
+    {
+      "names": ["bpf", "perf_event_open"],
+      "action": "SCMP_ACT_ERRNO",
+      "comment": "eBPFのロードやパフォーマンスカウンタ経由のホスト観測・サイドチャネル、既知のカーネル脆弱性の主要な攻撃面"
+    },
+    {
+      "names": ["open_by_handle_at", "name_to_handle_at"],
+      "action": "SCMP_ACT_ERRNO",
+      "comment": "不透明ハンドル経由でのファイルオープン。コンテナ/サンドボックス脱出の既知の手口"
+    },
+    {
+      "names": ["move_pages", "mbind", "get_mempolicy", "set_mempolicy"],
+      "action": "SCMP_ACT_ERRNO",
+      "comment": "NUMAメモリポリシー操作(このワークロードには不要、DoS/サイドチャネルの手口になり得る)"
+    },
+    {
+      "names": ["userfaultfd"],
+      "action": "SCMP_ACT_ERRNO",
+      "comment": "多数の権限昇格・UAF系エクスプロイトPoCで悪用されるページフォルト処理のユーザー空間ハンドリング"
+    },
+    {
+      "names": ["settimeofday", "stime", "clock_settime", "clock_adjtime"],
+      "action": "SCMP_ACT_ERRNO",
+      "comment": "システムクロックの変更。ホスト全体(ログ・スケジューラ等)に影響するため生徒コンテナからは不要"
+    },
+    {
+      "names": ["ioperm", "iopl", "vm86", "vm86old"],
+      "action": "SCMP_ACT_ERRNO",
+      "comment": "x86の生I/Oポートアクセス・仮想8086モード。直接ハードウェアに触れられてしまう既知の危険なレガシー呼び出し"
+    },
+    {
+      "names": ["lookup_dcookie", "kcmp", "ustat", "uselib"],
+      "action": "SCMP_ACT_ERRNO",
+      "comment": "カーネルアドレス/パスの情報漏えいや、廃止済みで現在は攻撃面にしかならないレガシー呼び出し"
+    }
+  ]
+}
