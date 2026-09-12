@@ -73,6 +73,22 @@ type Certification struct {
 	Name string `gorm:"not null"`
 }
 
+// FeatureType: クラスが使う機能種別のマスターテーブル(画像分類AI / Web開発環境 等)。
+// Course.FeatureTypeID から参照される。ENUMカラムではなくマスターテーブル方式に
+// しているのは、将来3つ目以降の機能拡張に備えるため。
+type FeatureType struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Key       string    `gorm:"type:varchar(50);not null;unique" json:"key"` // コード内の識別子(例: "image_classification")
+	Name      string    `gorm:"type:varchar(100);not null" json:"name"`      // 画面表示用の名称
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// feature_types.key の値。マジックストリングの重複を避けるための定数。
+const (
+	FeatureTypeKeyImageClassification = "image_classification"
+	FeatureTypeKeyWebDev              = "web_dev"
+)
+
 // Course はクラス情報の永続化モデルです。
 type Course struct {
 	gorm.Model
@@ -86,6 +102,14 @@ type Course struct {
 	// 先生がこのクラスでのAI新規作成/学習開始/性能テストを一時的に停止しているかどうか。
 	// クラス単位で管理する(グローバルなON/OFFではない)。
 	AiCreationBlocked bool `gorm:"not null;default:false"`
+
+	// クラスが使う機能種別(作成後は変更不可、変更したい場合はクラスを作り直す)。
+	// 意図的に `not null` タグを付けていない: 既存クラスがある状態でAutoMigrateが
+	// このカラムを追加する際、NOT NULLだと既存行がすべて弾かれて失敗するため。
+	// NULL許可のまま追加→既存行を一括更新→NOT NULL化、という安全な3段階は
+	// internal/db/client.go の Migrate() 内で生SQLとして実行する。
+	FeatureTypeID uint        `gorm:"index"`
+	FeatureType   FeatureType `gorm:"foreignKey:FeatureTypeID"`
 }
 
 // 生徒とクラスを結ぶリレーションテーブル
@@ -264,4 +288,137 @@ type StudentTestResultSnapshot struct {
 	PredictedLabelID      int     `gorm:"not null"`            // 生徒のAIが出した予測ラベルID（例: 3）
 	Confidence            float64 `gorm:"not null;type:float"` // 確信度（例: 0.92）
 	IsCorrect             bool    `gorm:"not null"`            // マッピングを基準にした正誤（true/false）
+}
+
+// ProgramSandbox: 中高生向けプログラム学習機能のサンドボックスコンテナの
+// 状態管理テーブル(NextPlan.md §3.4のルーティングテーブルに相当)。
+// 1ユーザーにつき1クラス1環境(AI画像分類システムと同様の方針)。
+// Docker自体が実際のコンテナ存在・状態の正とする(このテーブルはその写し・
+// 履歴であり、DB側の記録だけを信用してDocker操作をスキップすることはしない)。
+// DeletedAtがNULLの行が「現在有効な」サンドボックスを表す(削除時はソフト
+// デリートし、以前の割り当て履歴を残す)。
+type ProgramSandbox struct {
+	gorm.Model
+	UserID        uuid.UUID `gorm:"type:uuid;not null;index:idx_program_sandbox_user_course"`
+	User          User      `gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE"`
+	CourseID      uint      `gorm:"not null;index:idx_program_sandbox_user_course"`
+	Course        Course    `gorm:"foreignKey:CourseID;constraint:OnDelete:CASCADE"`
+	ContainerID   string    `gorm:"type:varchar(64);not null"`
+	ContainerName string    `gorm:"type:varchar(128);not null"`
+	// 生徒が作成時に付ける表示名(Docker上の実コンテナ名(ContainerName)とは別物。
+	// ContainerNameはuser_id+course_idから決定的に生成される内部識別用の名前で、
+	// Dockerのホスト全体でのユニーク制約を守るため生徒が自由入力する対象にはしない)。
+	Name string `gorm:"type:varchar(100);not null;default:''"`
+	// running / stopped。DockerのContainerStateをそのまま転記する
+	Status string `gorm:"type:varchar(20);not null;index"`
+	// 外部公開されているか。公開自体の実処理(リバースプロキシ経由の外部アクセス、
+	// NextPlan.md フェーズ7)は未実装のため、現時点では常にfalseのまま
+	// (フィールドとしてはDB/APIに用意しておき、公開機能実装時にそのまま使う)。
+	Published bool `gorm:"not null;default:false"`
+	// PoolSlot: このサンドボックスに割り当てられたディスククォータプールの
+	// スロット名(例: "pool-01")。ホスト側でループバックマウント済みのディレクトリ
+	// (scripts/setup-sandbox-pool.sh で事前作成、NextPlan.md §6)に対応し、
+	// コンテナ作成時に /root/workspace へbind mountする。空文字列 = 未割り当て
+	// (プール枯渇時などStartProgramContainerがエラーで弾くため通常発生しない)。
+	// 同時に使用中のスロットを求める際は「deleted_at IS NULLかつPoolSlot != ''」
+	// の行で判定する(program_service.go の allocatePoolSlot 参照)。
+	PoolSlot string `gorm:"type:varchar(32);not null;default:''"`
+	// LastActiveAt: 生徒がこのサンドボックスへ最後に活動した時刻(作成/再開/
+	// シェル・LSPチケット発行のたびに更新)。running かつ Published=false の
+	// サンドボックスがこの時刻から SANDBOX_IDLE_TIMEOUT_MINUTES 以上経過すると、
+	// アイドルタイムアウトの自動停止スイーパー
+	// (internal/service/idle_sandbox_service.go)の対象になる(NextPlan.md フェーズ2)。
+	// 公開中(Published=true)のコンテナは対象外(フェーズ7、§14「公開中のサスペンド除外」)。
+	// default付き: DEFAULTが無いとNOT NULL列をAutoMigrateで既存行のあるテーブルへ
+	// 追加する際「column contains null values」でALTER TABLE自体が失敗し(実際に
+	// この既存行4件で起きた)、マイグレーションがエラーのまま握りつぶされて列が
+	// 永久に作られない事故につながる。既存行はCURRENT_TIMESTAMPで埋める。
+	LastActiveAt time.Time `gorm:"not null;index;default:CURRENT_TIMESTAMP"`
+
+	// 以下、単一サブドメイン(preview.a-kiis.com)パスベース公開機能
+	// (NextPlan.md フェーズ7)。Published=trueの間だけ意味を持つ - 公開停止/
+	// 期限切れで降格した後もこれらの値自体は履歴として残すが(空文字列/ゼロ値
+	// へは戻さない)、ルーティングは必ずPublished=trueも一緒に確認すること
+	// (publish_service.goのFindSandboxByPublishSlug参照)。
+
+	// PublishSlug: 公開URL(https://preview.a-kiis.com/{PublishSlug}/)の
+	// パス先頭に使う、生徒のUserID(UUID)とは別のランダムな公開用識別子。
+	// 本人のアカウントIDをそのまま公開URLに晒さないための使い捨てトークンで、
+	// 公開するたびに新しく生成し直す(publish_service.goのgeneratePublishSlug)。
+	PublishSlug string `gorm:"type:varchar(32);not null;default:'';index"`
+	// PublishPort: 生徒のアプリが実際にlistenしているコンテナ内ポート
+	// (例: Flaskの既定である5000)。公開開始時に生徒が指定する。
+	PublishPort int `gorm:"not null;default:0"`
+	// PublishExpiresAt: この時刻を過ぎると自動失効スケジューラ
+	// (publish_service.goのStartPublishExpirySweeper)がPublished=falseへ
+	// 降格させる。「公開期間を延長する」操作はこの時刻を後ろへずらすだけ。
+	PublishExpiresAt time.Time `gorm:"not null;index;default:CURRENT_TIMESTAMP"`
+
+	// Locked: 教師ダッシュボードの安全対策(緊急停止/再開ロック、
+	// TeacherDashboardModal.tsx)。trueの間、生徒本人はこのコンテナを再開
+	// できない(ResumeProgramContainerがErrSandboxLockedを返す、
+	// program_service.goのrejectIfLocked参照) - 生徒が悪質な操作をした
+	// 場合に、教師が「緊急停止」(docker kill)した上でこのロックを掛け、
+	// 本人が勝手に再開して同じ操作を繰り返すのを防ぐ。ロック/解除は
+	// 教師のみ行える(SetSandboxLocked、teacher_dashboard_service.go)。
+	Locked bool `gorm:"not null;default:false"`
+	// LockedReason: ロックした理由(教師が任意入力、空文字列可)。監査/
+	// 経緯の記録用途のみで、ロック自体の可否判定には使わない。
+	LockedReason string `gorm:"type:text;not null;default:''"`
+}
+
+// ContentReport: 公開プレビュー(preview.a-kiis.com)経由で閲覧できてしまう
+// 生徒作成コンテンツについての通報受け口(NextPlan.md フェーズ7「悪用対策」)。
+// 自動判定・自動非公開化は行わない(誤検知で生徒の公開を勝手に止めてしまう
+// リスクを避けるため) - 教員が一覧を見て手動で対応する前提の記録テーブル。
+type ContentReport struct {
+	gorm.Model
+	// ReporterUserID: 通報した人(ログイン済みユーザーのみ通報可能)。
+	ReporterUserID uuid.UUID `gorm:"type:uuid;not null"`
+	Reporter       User      `gorm:"foreignKey:ReporterUserID;constraint:OnDelete:CASCADE"`
+	// PublishSlug: 通報対象の公開URL(ProgramSandbox.PublishSlug)。対象の
+	// サンドボックスが既に公開停止/削除済みでも通報自体は記録として残す
+	// (FK制約は張らない)。
+	PublishSlug string `gorm:"type:varchar(32);not null;index"`
+	Reason      string `gorm:"type:text;not null"`
+	// Reviewed: 教員が対応済みにチェックしたか(現時点では対応用のUI/APIは
+	// このタスクの範囲外 - フィールドとしてのみ用意しておく)。
+	Reviewed bool `gorm:"not null;default:false"`
+}
+
+// ProgramContainerCard: クラス内のサンドボックス一覧表示用のDTO(1行=1生徒のコンテナ)。
+type ProgramContainerCard struct {
+	Name          string `json:"name"`
+	ContainerName string `json:"container_name"`
+	StudentName   string `json:"student_name"`
+	Status        string `json:"status"`
+	Published     bool   `json:"published"`
+	// PublishSlug: 単一サブドメイン公開機能(NextPlan.md フェーズ7)の公開用
+	// 識別子。生のslugはJSONに含めない(publish_handler.goのpublishURL()で
+	// 完全なURLに組み立ててからPublishURLへ入れる、ハンドラー層の責務) -
+	// DTO自体はDB行の写しに留める。
+	PublishSlug string `json:"-"`
+	// PublishURL: ハンドラー層(ListProgramContainers)がPublishSlugから
+	// 組み立てる完全な公開URL。Published=falseの間は空文字列。
+	PublishURL string `json:"publish_url"`
+	// PublishExpiresAt: 残り公開時間のカウントダウン表示に使う
+	// (Published=falseの間はゼロ値)。
+	PublishExpiresAt time.Time `json:"publish_expires_at"`
+	// LastActiveAt: 教師ダッシュボード(TeacherDashboardModal.tsx)の稼働状況
+	// 表示に使う - 生徒一覧を見た時に「誰が実際に手を動かしているか」の目安
+	// になる(idle_sandbox_service.goのアイドルタイムアウト判定と同じ値)。
+	LastActiveAt time.Time `json:"last_active_at"`
+	// Locked/LockedReason: 教師ダッシュボードの安全対策(緊急停止/再開ロック)。
+	// Locked=trueの間、生徒本人はこのコンテナを再開できない
+	// (ProgramSandbox.Lockedのコメント参照)。
+	Locked       bool   `json:"locked"`
+	LockedReason string `json:"locked_reason"`
+	// UserID: 教師ダッシュボード(TeacherDashboardModal.tsx)が個別の公開停止/
+	// 一括操作の対象を指定するのに使う。UUID自体は秘密情報ではなく
+	// (これ単体では何の操作もできない - 実際の権限確認は常にAuthMiddleware
+	// で認証済みの呼び出し元本人のIDとクラスのteacher_idの一致で行う)、
+	// クラスに参加している全員が既にこの一覧自体を見られる前提と合わせて
+	// JSONにそのまま含める。
+	UserID uuid.UUID `json:"user_id"`
+	IsMine bool      `json:"is_mine"`
 }

@@ -1,0 +1,30 @@
+# ランタイムデータ: docker-compose.yml の volumes でホスト側ディレクトリが
+# そのままコンテナへbind mountされる(program_sandbox関連の説明と同じ理屈)。
+# イメージに焼き込んでも起動時にbind mountで上書きされるだけで無意味な上、
+# 現状これらだけでビルドコンテキストが16GB超に膨れて `docker build`/`up --build`
+# のたびにDocker daemonへ丸ごと転送されるのが「起動がめっちゃ遅い」の主因だった。
+images
+storage
+postgres_data
+surreal_data
+
+# air(ホットリロード)のビルド出力・キャッシュ。コンテナ内で都度再生成される。
+tmp
+
+# ホストで(クロス)ビルドした成果物バイナリ。コンテナ内は air がソースから
+# ビルドするので不要(むしろ別アーキテクチャ向けバイナリが混入する害がある)。
+main
+server
+
+# バージョン管理・秘密情報
+.git
+.gitignore
+.env
+.env.*
+
+# エディタ/OS由来
+.vscode
+.idea
+.DS_Store
+
+node_modules

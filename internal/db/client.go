@@ -9,6 +9,7 @@ import (
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var DB *gorm.DB
@@ -67,6 +68,7 @@ func Migrate() error {
 		&model.RegistrationTicket{},
 		&model.SystemLog{},
 		// クラス関連
+		&model.FeatureType{}, // Courseより先に(FeatureTypeIDのFK参照先のため)
 		&model.Course{},
 		&model.CourseEnrollment{},
 		&model.Enrollment{},
@@ -84,6 +86,9 @@ func Migrate() error {
 		&model.StudentTestJob{},
 		&model.StudentTestJobModel{},
 		&model.StudentTestResultSnapshot{},
+		// 中高生向けプログラム学習機能
+		&model.ProgramSandbox{},
+		&model.ContentReport{},
 	}
 
 	// まとめて実行
@@ -92,6 +97,48 @@ func Migrate() error {
 	if err != nil {
 		fmt.Printf("[ERROR] マイグレーション中にエラーが発生しました: %v\n", err)
 		return err
+	}
+
+	// feature_types のシード(存在しなければ挿入。冪等なので毎回の起動時に実行して問題ない)
+	seedFeatureTypes := []model.FeatureType{
+		{Key: model.FeatureTypeKeyImageClassification, Name: "画像分類AI"},
+		{Key: model.FeatureTypeKeyWebDev, Name: "Web開発環境"},
+	}
+	for _, ft := range seedFeatureTypes {
+		if err := DB.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "key"}},
+			DoNothing: true,
+		}).Create(&ft).Error; err != nil {
+			fmt.Printf("[ERROR] feature_typesのシードに失敗しました(key=%s): %v\n", ft.Key, err)
+			return err
+		}
+	}
+
+	// courses.feature_type_id の安全な3段階移行:
+	// 1. AutoMigrateで既にNULL許可のカラム(+FK制約)が追加済み(上のmodels一覧、既存行はNULLのままでもFK制約には抵触しない)
+	// 2. 既存の全クラスに「画像分類AI」を一括設定
+	if err := DB.Exec(`
+		UPDATE courses
+		SET feature_type_id = (SELECT id FROM feature_types WHERE key = ?)
+		WHERE feature_type_id IS NULL
+	`, model.FeatureTypeKeyImageClassification).Error; err != nil {
+		fmt.Printf("[ERROR] courses.feature_type_idの一括更新に失敗しました: %v\n", err)
+		return err
+	}
+	// 3. 全行埋まったことを確認してからNOT NULL化(Postgresでは既にNOT NULLの列に
+	//    再度SET NOT NULLしてもエラーにならないため、この関数を毎起動時に呼んでも安全)
+	var remainingNull int64
+	if err := DB.Raw(`SELECT COUNT(*) FROM courses WHERE feature_type_id IS NULL`).Scan(&remainingNull).Error; err != nil {
+		fmt.Printf("[ERROR] feature_type_idの未設定件数確認に失敗しました: %v\n", err)
+		return err
+	}
+	if remainingNull == 0 {
+		if err := DB.Exec(`ALTER TABLE courses ALTER COLUMN feature_type_id SET NOT NULL`).Error; err != nil {
+			fmt.Printf("[ERROR] courses.feature_type_idのNOT NULL化に失敗しました: %v\n", err)
+			return err
+		}
+	} else {
+		fmt.Printf("[WARN] courses.feature_type_id が %d 件未設定のため、NOT NULL化をスキップしました\n", remainingNull)
 	}
 
 	// テーブルが実際に作成されたか確認するためのログ（デバッグ用）

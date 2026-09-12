@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"ai-education/backend/internal/db"
+	"ai-education/backend/internal/docker"
 	"ai-education/backend/internal/model"
 	"ai-education/backend/internal/utils"
 
@@ -18,7 +19,8 @@ import (
 )
 
 type Handler struct {
-	DB *gorm.DB
+	DB           *gorm.DB
+	DockerClient docker.ContainerAPI
 }
 
 func (h *Handler) respondError(c *gin.Context, status int, action, message string, err error) {

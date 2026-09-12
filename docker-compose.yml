@@ -43,9 +43,19 @@ services:
       - PASETO_KEY=${PASETO_KEY}
       - PYTHON_TEST_URL=${PYTHON_TEST_URL}
       - PYTHON_REDUCE_DIVERSITY_API_URL=${PYTHON_REDUCE_DIVERSITY_API_URL}
+      - DOCKER_HOST=${DOCKER_HOST}
+      - SANDBOX_CPU_LIMIT=${SANDBOX_CPU_LIMIT}
+      - SANDBOX_MEMORY_LIMIT_MB=${SANDBOX_MEMORY_LIMIT_MB}
+      - SANDBOX_PIDS_LIMIT=${SANDBOX_PIDS_LIMIT}
+      - SANDBOX_POOL_BASE_DIR=${SANDBOX_POOL_BASE_DIR}
+      - SANDBOX_POOL_SIZE=${SANDBOX_POOL_SIZE}
+      - SANDBOX_IDLE_TIMEOUT_MINUTES=${SANDBOX_IDLE_TIMEOUT_MINUTES}
     volumes:
       - ./images:/app/images
       - ./storage:/app/storage
+      # 中高生向けプログラム学習機能: backendコンテナ自身からホストのDocker
+      # デーモンを操作し、サンドボックスコンテナ(sibling container)を管理する
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       db:
         condition: service_healthy
@@ -81,4 +91,11 @@ services:
 networks:
   ai-net:
     name: ai-net
+    driver: bridge
+  # 中高生向けプログラム学習機能のサンドボックスコンテナ専用ネットワーク。
+  # 本番ai-netとは完全に分離する(NextPlan.md §3.3)。backendサービス自体は
+  # このネットワークには参加せず、Docker API経由でサンドボックスコンテナを
+  # このネットワークに接続する。
+  sandbox-net:
+    name: sandbox-net
     driver: bridge

@@ -34,6 +34,8 @@ type LoginRequest struct {
 type CreateClassInput struct {
 	ClassName   string `json:"className" binding:"required"`
 	Description string `json:"description"`
+	// 作成後は変更不可(変更したい場合はクラスを作り直す)
+	FeatureTypeID uint `json:"featureTypeId" binding:"required"`
 }
 
 // クラス参加用
@@ -52,6 +54,8 @@ type ClassSend struct {
 	ThemeColor        string    `json:"theme_color"`
 	UpdataTime        time.Time `json:"updata_time"`
 	AiCreationBlocked bool      `json:"ai_creation_blocked"`
+	FeatureTypeKey    string    `json:"feature_type_key"`
+	FeatureTypeName   string    `json:"feature_type_name"`
 }
 
 // 画像アップロード時のリクエスト構造体（multipart用とは別にJSONとして扱う場合）

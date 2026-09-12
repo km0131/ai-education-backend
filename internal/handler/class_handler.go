@@ -78,8 +78,19 @@ func (h *Handler) CreateClass(c *gin.Context) {
 		return
 	}
 
+	// feature_type_id の存在確認(未知のIDだとFK制約違反として分かりにくく失敗するため事前に弾く)
+	exists, err := db.FeatureTypeExists(h.DB, input.FeatureTypeID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "機能種別の確認に失敗しました"})
+		return
+	}
+	if !exists {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "不正な機能種別です"})
+		return
+	}
+
 	// 5. 先ほど作成したDB関数を呼び出す
-	course, err := db.CreateCourse(h.DB, input.ClassName, input.Description, userId)
+	course, err := db.CreateCourse(h.DB, input.ClassName, input.Description, userId, input.FeatureTypeID)
 	if err != nil {
 		// 招待コード生成失敗かDB保存失敗か、必要に応じてエラー内容でハンドリングしてもOK
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "クラスの作成に失敗しました"})

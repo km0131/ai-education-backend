@@ -1,5 +1,5 @@
 # 安定版のイメージを指定（ラズパイOSが64bitなら aarch64 が自動で選ばれます）
-FROM docker.io/library/golang:1.25-alpine
+FROM golang:alpine
 
 # ビルドに必要な最小限のツール（gccなど）をインストール
 # GORMなどでCGOを使う場合は build-base が必要になることがあります
@@ -15,8 +15,11 @@ RUN go install github.com/air-verse/air@v1.61.7
 
 # 依存関係のコピーとキャッシュ利用
 COPY go.mod go.sum ./
-ENV GOPROXY=https://proxy.golang.org,direct
-RUN go env -w GOPROXY=$GOPROXY && go mod download
+# デフォルトは公式プロキシ。
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
+
+RUN go mod download
 
 # ソースコードのコピー（airで監視するため）
 COPY . .

@@ -25,9 +25,12 @@ func TeacherClassSearch(db *gorm.DB, teacherID uuid.UUID) ([]model.ClassSend, er
             courses.invite_code AS invite_code,
             courses.theme_color AS theme_color,
             courses.updated_at AS updata_time, -- カラム名を構造体にマッピング
-            (SELECT COUNT(*) FROM course_enrollments WHERE course_enrollments.course_id = courses.id AND course_enrollments.deleted_at IS NULL) AS student_count -- サブクエリで人数をカウント
+            (SELECT COUNT(*) FROM course_enrollments WHERE course_enrollments.course_id = courses.id AND course_enrollments.deleted_at IS NULL) AS student_count, -- サブクエリで人数をカウント
+            feature_types.key AS feature_type_key,
+            feature_types.name AS feature_type_name
         `).
 		Joins("JOIN users ON users.id = courses.teacher_id"). // 先生の情報を結合
+		Joins("JOIN feature_types ON feature_types.id = courses.feature_type_id").
 		Where("courses.teacher_id = ? AND courses.deleted_at IS NULL", teacherID).
 		Order("courses.updated_at DESC"). // 最新順
 		Scan(&results).Error
@@ -48,11 +51,14 @@ func ClassTeacherSearch(db *gorm.DB, studentID uuid.UUID) ([]model.ClassSend, er
             courses.invite_code AS invite_code,
             courses.theme_color AS theme_color,
             courses.updated_at AS updata_time,
-            (SELECT COUNT(*) FROM course_enrollments WHERE course_enrollments.course_id = courses.id AND course_enrollments.deleted_at IS NULL) AS student_count
+            (SELECT COUNT(*) FROM course_enrollments WHERE course_enrollments.course_id = courses.id AND course_enrollments.deleted_at IS NULL) AS student_count,
+            feature_types.key AS feature_type_key,
+            feature_types.name AS feature_type_name
         `).
 		// 🌟 中間テーブル（course_enrollments）を経由して、自分が参加しているクラスを絞り込む
 		Joins("JOIN course_enrollments ON course_enrollments.course_id = courses.id").
 		Joins("JOIN users ON users.id = courses.teacher_id"). // 先生の名前取得用
+		Joins("JOIN feature_types ON feature_types.id = courses.feature_type_id").
 		Where("course_enrollments.user_id = ? AND course_enrollments.deleted_at IS NULL AND courses.deleted_at IS NULL", studentID).
 		Order("course_enrollments.created_at DESC"). // 参加したのが新しい順
 		Scan(&results).Error
@@ -97,8 +103,10 @@ func RegisterStudentToCourse(tx *gorm.DB, userID uuid.UUID, courseID uint) error
 	return tx.Create(&studentCourse).Error
 }
 
-// CreateCourse は招待コードを自動生成し、新しいクラスをDBに保存します
-func CreateCourse(tx *gorm.DB, title string, description string, teacherID uuid.UUID) (*model.Course, error) {
+// CreateCourse は招待コードを自動生成し、新しいクラスをDBに保存します。
+// featureTypeID は呼び出し側で FeatureTypeExists() による存在確認を済ませておくこと
+// (ここではFK制約違反として弾かれるだけで、分かりやすいエラーメッセージにはならない)。
+func CreateCourse(tx *gorm.DB, title string, description string, teacherID uuid.UUID, featureTypeID uint) (*model.Course, error) {
 	// 色ランダム
 	colors := []string{
 		"blue",
@@ -124,11 +132,12 @@ func CreateCourse(tx *gorm.DB, title string, description string, teacherID uuid.
 		}
 
 		course = &model.Course{
-			Title:       title,
-			Description: description,
-			InviteCode:  inviteCode,
-			TeacherID:   teacherID,
-			ThemeColor:  randomColor,
+			Title:         title,
+			Description:   description,
+			InviteCode:    inviteCode,
+			TeacherID:     teacherID,
+			ThemeColor:    randomColor,
+			FeatureTypeID: featureTypeID,
 		}
 
 		// DBに挿入を試みる
@@ -158,6 +167,19 @@ func IsAiCreationBlocked(db *gorm.DB, courseID uint) (bool, error) {
 		return false, err
 	}
 	return course.AiCreationBlocked, nil
+}
+
+// IsCourseTeacher reports whether teacherID is the (sole) teacher of courseID
+// - 教師ダッシュボード(TeacherDashboardModal.tsx)の一括操作/個別公開停止等、
+// 複数のDocker操作にまたがりSetAiCreationBlockedのような単発UPDATE文
+// 1本では所有権チェックを組み込めない処理向けの、事前確認用ヘルパー。
+func IsCourseTeacher(tx *gorm.DB, courseID uint, teacherID uuid.UUID) (bool, error) {
+	var count int64
+	err := tx.Model(&model.Course{}).Where("id = ? AND teacher_id = ?", courseID, teacherID).Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 // SetAiCreationBlocked: クラスのブロック状態を切り替える。
@@ -191,9 +213,12 @@ func GetClassDetailsForUser(db *gorm.DB, classID string, userID uuid.UUID) (*mod
 			courses.theme_color AS theme_color,
 			courses.updated_at AS updata_time,
 			courses.ai_creation_blocked AS ai_creation_blocked,
-			(SELECT COUNT(*) FROM course_enrollments WHERE course_enrollments.course_id = courses.id AND course_enrollments.deleted_at IS NULL) AS student_count
+			(SELECT COUNT(*) FROM course_enrollments WHERE course_enrollments.course_id = courses.id AND course_enrollments.deleted_at IS NULL) AS student_count,
+			feature_types.key AS feature_type_key,
+			feature_types.name AS feature_type_name
 		`).
 		Joins("JOIN users ON users.id = courses.teacher_id"). // 先生の名前取得用
+		Joins("JOIN feature_types ON feature_types.id = courses.feature_type_id").
 		// 左外部結合で中間テーブルを繋ぎ、自分が「先生」か「参加生徒」のどちらかならヒットさせる
 		Joins("LEFT JOIN course_enrollments ON course_enrollments.course_id = courses.id AND course_enrollments.user_id = ? AND course_enrollments.deleted_at IS NULL", userID).
 		// クラスのIDが一致、かつ（自分が作ったクラス、または自分が参加しているクラス）に絞る
