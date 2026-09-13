@@ -116,6 +116,8 @@ func EmergencyStopContainer(ctx context.Context, cli docker.ContainerAPI, tx *go
 		return ErrNotCourseTeacher
 	}
 
+	defer lockSandboxOp(targetUserID, courseID)()
+
 	existing, err := findSandbox(ctx, cli, targetUserID, courseID)
 	if err != nil {
 		return err

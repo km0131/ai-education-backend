@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"ai-education/backend/internal/db"
@@ -88,6 +89,46 @@ var ErrSandboxPublished = errors.New("公開中のため実行できません。
 var ErrSandboxLocked = errors.New("このコンテナはロックされているため再開できません。担当の先生に確認してください。")
 
 const defaultSandboxName = "無題の環境"
+
+// sandboxOpLocks serializes Start/Resume/Stop/Delete/EmergencyStop for the
+// same(userID, courseID)sandbox against each other - Start/Stop/Resume/
+// Delete/EmergencyStopContainerはどれも「Docker側の現在の状態をfindSandbox
+// 等で読む→その数手先でDocker操作+DB更新を行う」という形で、読んでから
+// 実際に手を動かすまでの間に複数回のネットワークI/Oを挟む。この間に別の
+// goroutine(生徒本人の別タブ、教師ダッシュボード、アイドルタイムアウト
+// スイーパー、のいずれか2つ以上)が同じサンドボックスへ同時に操作をかけると、
+// 例えば「再開処理が起動を終える直前に、別経路からの停止処理が同じ
+// コンテナを掴んで止めてしまい、再開自体はDB上"running"と書き込むのに
+// 実体はすぐ後に停止済み」という食い違いが起き得る - このロックは各操作の
+// 「読んで→動かす」全体を1つの臨界区間として直列化し、そのクラスの競合を
+// 構造的に起こり得なくする。単一プロセス構成(NextPlan.md §3.5)を前提とした
+// プロセス内メモリのみのロック(ticketStore等と同じ設計) - 対象は生徒×クラス
+// の組ごとに高々1つなので、ticketStoreと違って有効期限による掃除は行わず、
+// 一度作られたエントリはプロセス生存中ずっと保持する(問題になるほどの
+// 数には現実的にならないため)。
+var (
+	sandboxOpLocksMu sync.Mutex
+	sandboxOpLocks   = map[string]*sync.Mutex{}
+)
+
+// lockSandboxOp acquires the per-(userID, courseID)lock and returns a
+// function that releases it - callers should acquire it as the very first
+// thing in the function and `defer unlock()`immediately, before any
+// Docker/DB call.
+func lockSandboxOp(userID uuid.UUID, courseID uint) (unlock func()) {
+	key := userID.String() + ":" + strconv.FormatUint(uint64(courseID), 10)
+
+	sandboxOpLocksMu.Lock()
+	mu, ok := sandboxOpLocks[key]
+	if !ok {
+		mu = &sync.Mutex{}
+		sandboxOpLocks[key] = mu
+	}
+	sandboxOpLocksMu.Unlock()
+
+	mu.Lock()
+	return mu.Unlock
+}
 
 // containerName returns the deterministic container name for a user's
 // per-course sandbox. 画像分類システムと同様、1ユーザーにつき1クラス1環境
@@ -229,6 +270,8 @@ func allocatePoolSlot(tx *gorm.DB) (string, error) {
 // defaultSandboxName if blank); it is unrelated to the Docker-level
 // container name, which stays server-generated for uniqueness.
 func StartProgramContainer(ctx context.Context, cli docker.ContainerAPI, tx *gorm.DB, userID uuid.UUID, courseID uint, displayName string) (containerID string, err error) {
+	defer lockSandboxOp(userID, courseID)()
+
 	existing, err := findSandbox(ctx, cli, userID, courseID)
 	if err != nil {
 		return "", err
@@ -294,6 +337,30 @@ func StartProgramContainer(ctx context.Context, cli docker.ContainerAPI, tx *gor
 	}
 	initWorkspaceGitRepo(ctx, cli, containerID)
 
+	// gVisor(runsc)はコンテナのメモリ管理をSentryプロセス自身が担うため、
+	// cgroupのメモリ上限(resourceLimits)に達すると、個別プロセスだけでなく
+	// コンテナ全体がまとめてOOM Killされることがある(ホストの空きメモリが
+	// 少ない環境、特にラズパイで実際に観測されている - NextPlan.md §16の
+	// 「ラズパイのRAM実測を踏まえて確定する未確定事項」参照、
+	// initWorkspaceGitRepoのexit=137ログとセットで起きる)。これを見逃すと、
+	// DBには"running"として記録したのに実体はすでに終了しているという
+	// 食い違いが生じ、直後のファイル一覧/シェル接続が説明の付かない409
+	// (ErrSandboxNotRunning)で失敗し続けることになる - ここで一度だけ生死を
+	// 確認し、既に終了していれば起動失敗として素直に報告する。
+	if running, checkErr := containerIsRunning(ctx, cli, containerID); checkErr != nil {
+		log.Printf("[SANDBOX-START] 起動直後の状態確認に失敗しました container=%s err=%v", containerID, checkErr)
+	} else if !running {
+		log.Printf("[SANDBOX-START] コンテナが起動直後に終了しました(メモリ不足によるOOM Killの可能性があります) container=%s", containerID)
+		if rmErr := cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true}); rmErr != nil {
+			log.Printf("[SANDBOX-START] 起動直後に終了したコンテナの削除にも失敗しました(手動確認が必要な可能性があります) container=%s err=%v", containerID, rmErr)
+		}
+		return "", &StartContainerError{
+			Retryable: true,
+			Message:   "環境の起動に失敗しました(メモリ不足の可能性があります)。しばらくしてからもう一度お試しください。",
+			Cause:     errors.New("container exited immediately after start"),
+		}
+	}
+
 	if err := db.CreateProgramSandbox(tx, userID, courseID, containerID, dockerName, displayName, "running", poolSlot); err != nil {
 		// Dockerコンテナは既に起動済みなのに記録だけ失敗した状態を放置しない。
 		// 放置すると: 次回findSandbox()がこの孤立コンテナをDocker側から見つけて
@@ -305,6 +372,25 @@ func StartProgramContainer(ctx context.Context, cli docker.ContainerAPI, tx *gor
 		return "", &StartContainerError{Retryable: true, Message: "コンテナの記録に失敗しました。もう一度お試しください。", Cause: err}
 	}
 	return containerID, nil
+}
+
+// containerIsRunning re-checks a just-started container's live state via
+// Docker directly (the DB row hasn't been written yet at this point in
+// StartProgramContainer) - looks it up by ID via ContainerList rather than
+// adding a dedicated ContainerInspect method to ContainerAPI, matching
+// findSandbox's existing filter-based lookup style.
+func containerIsRunning(ctx context.Context, cli docker.ContainerAPI, containerID string) (bool, error) {
+	list, err := cli.ContainerList(ctx, container.ListOptions{
+		All:     true,
+		Filters: filters.NewArgs(filters.Arg("id", containerID)),
+	})
+	if err != nil {
+		return false, err
+	}
+	if len(list) == 0 {
+		return false, nil
+	}
+	return list[0].State == "running", nil
 }
 
 // initWorkspaceGitRepo runs `git init` inside the freshly created sandbox's
@@ -323,7 +409,17 @@ func initWorkspaceGitRepo(ctx context.Context, cli docker.ContainerAPI, containe
 		return
 	}
 	if exitCode != 0 {
-		log.Printf("[SANDBOX-START] git initが失敗しました(exit=%d) container=%s stderr=%s", exitCode, containerID, strings.TrimSpace(stderr))
+		hint := ""
+		if exitCode == 137 {
+			// 137 = 128+9 (SIGKILL)。git init自体が重い処理ではないため、
+			// これが起きる時はほぼ確実にcgroupのメモリ上限超過によるOOM Kill
+			// (ホスト側のkernelもしくはgVisorのSentryによるもの)であり、
+			// git initプロセス単体どころかコンテナ全体が道連れで終了して
+			// いることが多い(StartProgramContainerのcontainerIsRunningに
+			// よる直後の生死確認を参照)。
+			hint = "(exit=137はSIGKILL - メモリ不足によるOOM Killの可能性が高く、コンテナ全体が終了している場合もあります。SANDBOX_MEMORY_LIMIT_MBやホストの空きメモリを確認してください)"
+		}
+		log.Printf("[SANDBOX-START] git initが失敗しました(exit=%d)%s container=%s stderr=%s", exitCode, hint, containerID, strings.TrimSpace(stderr))
 	}
 }
 
@@ -345,6 +441,8 @@ func ResumeProgramContainer(ctx context.Context, cli docker.ContainerAPI, tx *go
 // ResumeProgramContainer(生徒本人、ロック確認あり)and
 // ResumeContainerAsTeacher(教師、ロック確認なし - teacher_dashboard_service.go)。
 func resumeProgramContainer(ctx context.Context, cli docker.ContainerAPI, tx *gorm.DB, userID uuid.UUID, courseID uint) (containerID string, alreadyRunning bool, err error) {
+	defer lockSandboxOp(userID, courseID)()
+
 	existing, err := findSandbox(ctx, cli, userID, courseID)
 	if err != nil {
 		return "", false, err
@@ -403,6 +501,8 @@ func rejectIfLocked(tx *gorm.DB, userID uuid.UUID, courseID uint) error {
 // currently published(公開中に停止してしまうと、公開URLが応答しない
 // ページになってしまうため - 先にIDEで公開を停止させる)。
 func StopProgramContainer(ctx context.Context, cli docker.ContainerAPI, tx *gorm.DB, userID uuid.UUID, courseID uint) error {
+	defer lockSandboxOp(userID, courseID)()
+
 	if err := rejectIfPublished(tx, userID, courseID); err != nil {
 		return err
 	}
@@ -432,6 +532,8 @@ func StopProgramContainer(ctx context.Context, cli docker.ContainerAPI, tx *gorm
 // which requires the container to be running - if it was stopped, this
 // briefly starts it just long enough to run the cleanup command.
 func DeleteProgramContainer(ctx context.Context, cli docker.ContainerAPI, tx *gorm.DB, userID uuid.UUID, courseID uint) error {
+	defer lockSandboxOp(userID, courseID)()
+
 	if err := rejectIfPublished(tx, userID, courseID); err != nil {
 		return err
 	}
