@@ -182,8 +182,8 @@ func gitShowFileAtRef(ctx context.Context, cli docker.ContainerAPI, containerID,
 
 // CommitWorkspace runs `git add -A && git commit -m <message>` inside the
 // sandbox's workspace(「保存(コミット)」ボタン、NextPlan.md フェーズ5)。
-// git initはコンテナ生成時に自動実行済み(initWorkspaceGitRepo、
-// program_service.go)なので、ここでは前提として扱う。
+// git initはコンテナ起動時にentrypoint.shが自動実行済み
+// (sandbox-images/sandbox-base/entrypoint.sh)なので、ここでは前提として扱う。
 // messageはargvの1要素としてそのままgitプロセスへ渡る(runContainerCommand
 // 参照 - シェル文字列に埋め込まないため引用符・バックティック等のエスケープは
 // 不要)。

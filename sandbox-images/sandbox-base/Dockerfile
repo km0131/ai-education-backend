@@ -34,12 +34,12 @@ WORKDIR /root
 
 RUN pyright --version
 
-# git: `git init`はコンテナ生成時にGo側(program_service.go)が自動実行する
-# ので、生徒は最初からコミットできる状態になる。identity未設定だと最初の
-# `git commit`が「Please tell me who you are」で失敗するため、動く状態の
-# デフォルトとして汎用のidentityを設定しておく(生徒は`git config`で
-# 上書き可能)。init.defaultBranch=mainはgitの警告(hint: ...master...)を
-# 出さないための最近のデフォルトへの追従。
+# git: `git init`はコンテナ起動時にentrypoint.shが自動実行する(下記COPY
+# entrypoint.sh参照)ので、生徒は最初からコミットできる状態になる。
+# identity未設定だと最初の`git commit`が「Please tell me who you are」で
+# 失敗するため、動く状態のデフォルトとして汎用のidentityを設定しておく
+# (生徒は`git config`で上書き可能)。init.defaultBranch=mainはgitの警告
+# (hint: ...master...)を出さないための最近のデフォルトへの追従。
 RUN git config --global user.name "Student" \
     && git config --global user.email "student@sandbox.local" \
     && git config --global init.defaultBranch main
@@ -58,15 +58,12 @@ COPY workspace-init/README.md /opt/workspace-init/README.md
 # フェーズ6)。他言語を使う生徒は、このファイルに自分でエントリを追記する。
 COPY workspace-init/lsp-config.json /opt/workspace-init/lsp-config.json
 
-# resolv.conf書き換え用のエントリポイントスクリプト
-# (sandbox-net + gVisorの組み合わせではDocker内蔵DNS(127.0.0.11)に
-#  到達できないため、起動時に外部DNSへ強制的に向け直す)
-# あわせて、初回起動時(workspaceにまだREADME.md/.ai/lsp-config.jsonが
-# 無い時)だけそれぞれのデフォルトファイルを配置する。resume(停止済み
-# コンテナの再起動)でもENTRYPOINTは毎回実行されるため、`-f`チェックにより
-# 2回目以降は何もしない(生徒が削除/編集した後を上書きしないため)。
-RUN printf '#!/bin/bash\necho "nameserver 8.8.8.8" > /etc/resolv.conf 2>/dev/null || true\necho "nameserver 8.8.4.4" >> /etc/resolv.conf 2>/dev/null || true\nmkdir -p /root/workspace\n[ -f /root/workspace/README.md ] || cp /opt/workspace-init/README.md /root/workspace/README.md 2>/dev/null || true\nmkdir -p /root/workspace/.ai\n[ -f /root/workspace/.ai/lsp-config.json ] || cp /opt/workspace-init/lsp-config.json /root/workspace/.ai/lsp-config.json 2>/dev/null || true\nexec "$@"\n' > /usr/local/bin/entrypoint.sh \
-    && chmod +x /usr/local/bin/entrypoint.sh
+# エントリポイントスクリプト: DNS上書き・ワークスペース初期化・git init・
+# Readyフラグ作成までを1つのスクリプトに集約している(entrypoint.sh参照 -
+# 以前はDockerfile内にprintfで直接埋め込んだ短い一行だったが、ステップが
+# 増えて読みにくくなったため実ファイルに切り出した)。
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 # コンテナのメインプロセスはただ生き続けるだけでよい。対話シェル自体は

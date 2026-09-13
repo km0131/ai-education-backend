@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -54,22 +53,30 @@ const (
 	execWipeTimeout      = 10 * time.Second
 	execWipePollInterval = 100 * time.Millisecond
 
-	// initWorkspaceGitRepoが`git init`を実行する際の上限時間の既定値。
-	// ラズパイ等のI/Oが遅い環境でも安全側に倒せるよう.envで調整可能にして
-	// おく(sandboxExecTimeout参照)。これは「Go側が能動的にプロセスへ
-	// SIGKILLを送る」ためのものではなく(そのような仕組みはこのコードには
-	// 存在しない - contextがキャンセルされた場合、ExecAttach/ExecInspect自体が
-	// エラーを返して終わるだけで、コンテナ内のgitプロセスへ信号は飛ばない)、
-	// 純粋に「git initが万一ハングした場合にリクエストを永遠に塞がせない」
-	// ための保険。exit=137(SIGKILL)自体の原因(cgroupのメモリ上限超過による
-	// OOM Kill、containerIsRunningのコメント参照)とは別の話。
-	// defaultSandboxStartTimeoutSec(全体の上限)より短く取り、1コマンドの
-	// ハングが全体予算を丸ごと食いつぶさないようにしている。
+	// waitForSandboxReadyが/tmp/sandbox-readyの存在を確認する間隔と、
+	// 1回1回の確認コマンド(exec)自体の上限時間の既定値。ラズパイ等の
+	// I/Oが遅い環境でも安全側に倒せるよう.envで調整可能にしておく
+	// (sandboxExecTimeout参照)。これは「Go側が能動的にプロセスへSIGKILLを
+	// 送る」ためのものではなく(そのような仕組みはこのコードには存在しない -
+	// contextがキャンセルされた場合、ExecAttach/ExecInspect自体がエラーを
+	// 返して終わるだけで、コンテナ内のプロセスへ信号は飛ばない)、純粋に
+	// 「1回のexecが万一ハングした場合にリクエストを永遠に塞がせない」ための
+	// 保険。exit=137(SIGKILL)自体の原因(cgroupのメモリ上限超過によるOOM
+	// Kill、containerIsRunningのコメント参照)とは別の話。
+	// defaultSandboxReadyTimeoutSec(待機全体の上限)より短く取り、1回の
+	// execのハングが待機予算を丸ごと食いつぶさないようにしている。
+	sandboxReadyPollInterval     = 200 * time.Millisecond
 	defaultSandboxExecTimeoutSec = 15
 
-	// StartProgramContainer全体(ContainerCreate/Start・git init・起動直後の
-	// 生死確認)の既定の上限時間。defaultSandboxExecTimeoutSecと同様、
-	// 実際にプロセスへ信号を送る仕組みではなく、リクエストを無期限に
+	// waitForSandboxReadyが/tmp/sandbox-readyの出現を待つ、待機全体としての
+	// 既定の上限時間。手動検証(entrypoint.sh側の初期化は実測1〜2秒程度)を
+	// 踏まえた値だが、ラズパイの実運用環境で調整できるよう.envで上書き可能
+	// にする。
+	defaultSandboxReadyTimeoutSec = 30
+
+	// StartProgramContainer全体(ContainerCreate/Start・初期化完了待ち・
+	// 起動直後の生死確認)の既定の上限時間。defaultSandboxExecTimeoutSecと
+	// 同様、実際にプロセスへ信号を送る仕組みではなく、リクエストを無期限に
 	// 待たせないための保険(sandboxStartTimeoutのコメント参照)。
 	defaultSandboxStartTimeoutSec = 30
 )
@@ -218,14 +225,28 @@ func resourceLimits() (nanoCPUs int64, memoryBytes int64, pidsLimit int64) {
 
 // sandboxExecTimeout reads SANDBOX_EXEC_TIMEOUT_SEC from the environment,
 // falling back to defaultSandboxExecTimeoutSec when unset or invalid. Bounds
-// how long initWorkspaceGitRepo waits for `git init` to finish - a safety
-// net against a genuinely hung exec (slow disk I/O on constrained hardware),
-// not a mechanism for terminating the process itself (defaultSandboxExecTimeoutSec
-// のコメント参照 - contextのキャンセルはこちら側の待ちを諦めるだけで、
-// コンテナ内のプロセスへ信号を送るわけではない)。
+// each individual exec call waitForSandboxReady makes(1回1回の`test -f`
+// 確認) - a safety net against a genuinely hung exec (slow disk I/O on
+// constrained hardware), not a mechanism for terminating the process itself
+// (defaultSandboxExecTimeoutSecのコメント参照 - contextのキャンセルは
+// こちら側の待ちを諦めるだけで、コンテナ内のプロセスへ信号を送るわけでは
+// ない)。
 func sandboxExecTimeout() time.Duration {
 	seconds := defaultSandboxExecTimeoutSec
 	if v := os.Getenv("SANDBOX_EXEC_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			seconds = n
+		}
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// sandboxReadyTimeout reads SANDBOX_READY_TIMEOUT_SEC from the environment,
+// falling back to defaultSandboxReadyTimeoutSec when unset or invalid. Bounds
+// how long waitForSandboxReady polls in total before giving up.
+func sandboxReadyTimeout() time.Duration {
+	seconds := defaultSandboxReadyTimeoutSec
+	if v := os.Getenv("SANDBOX_READY_TIMEOUT_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			seconds = n
 		}
@@ -404,33 +425,43 @@ func StartProgramContainer(ctx context.Context, cli docker.ContainerAPI, tx *gor
 	}
 	log.Printf("[SANDBOX-START] ContainerCreate+ContainerStart 完了 container=%s elapsed=%s", containerID, time.Since(createStartedAt))
 
-	gitInitStartedAt := time.Now()
-	initWorkspaceGitRepo(startCtx, cli, containerID)
-	log.Printf("[SANDBOX-START] git init 完了 container=%s elapsed=%s", containerID, time.Since(gitInitStartedAt))
+	// entrypoint.sh側でDNS上書き・ワークスペース初期化・git initまでを一括で
+	// 行い、最後に/tmp/sandbox-readyを作る(sandbox-images/sandbox-base/
+	// entrypoint.sh参照) - ここではその完了をポーリングで待つだけでよい。
+	readyStartedAt := time.Now()
+	if err := waitForSandboxReady(startCtx, cli, containerID); err != nil {
+		log.Printf("[SANDBOX-START] 初期化完了待ちに失敗しました container=%s elapsed=%s err=%v", containerID, time.Since(readyStartedAt), err)
 
-	// gVisor(runsc)はコンテナのメモリ管理をSentryプロセス自身が担うため、
-	// cgroupのメモリ上限(resourceLimits)に達すると、個別プロセスだけでなく
-	// コンテナ全体がまとめてOOM Killされることがある(ホストの空きメモリが
-	// 少ない環境、特にラズパイで実際に観測されている - NextPlan.md §16の
-	// 「ラズパイのRAM実測を踏まえて確定する未確定事項」参照、
-	// initWorkspaceGitRepoのexit=137ログとセットで起きる)。これを見逃すと、
-	// DBには"running"として記録したのに実体はすでに終了しているという
-	// 食い違いが生じ、直後のファイル一覧/シェル接続が説明の付かない409
-	// (ErrSandboxNotRunning)で失敗し続けることになる - ここで一度だけ生死を
-	// 確認し、既に終了していれば起動失敗として素直に報告する。
-	if running, checkErr := containerIsRunning(startCtx, cli, containerID); checkErr != nil {
-		log.Printf("[SANDBOX-START] 起動直後の状態確認に失敗しました container=%s err=%v", containerID, checkErr)
-	} else if !running {
-		log.Printf("[SANDBOX-START] コンテナが起動直後に終了しました(メモリ不足によるOOM Killの可能性があります) container=%s", containerID)
+		// gVisor(runsc)はコンテナのメモリ管理をSentryプロセス自身が担うため、
+		// cgroupのメモリ上限(resourceLimits)に達すると、個別プロセスだけで
+		// なくコンテナ全体がまとめてOOM Killされることがある(ホストの空き
+		// メモリが少ない環境、特にラズパイで実際に観測されている -
+		// NextPlan.md §16の「ラズパイのRAM実測を踏まえて確定する未確定事項」
+		// 参照)。これを見逃すと、DBには"running"として記録したのに実体は
+		// すでに終了しているという食い違いが生じ、直後のファイル一覧/
+		// シェル接続が説明の付かない409(ErrSandboxNotRunning)で失敗し続ける
+		// ことになる - ここで一度だけ生死を確認し、OOM Killによる全滅なのか
+		// (コンテナごと終了)、生きてはいるが初期化がハングしているだけ
+		// なのかを切り分けてメッセージを変える。
+		running, checkErr := containerIsRunning(startCtx, cli, containerID)
+		if checkErr != nil {
+			log.Printf("[SANDBOX-START] 起動直後の状態確認に失敗しました container=%s err=%v", containerID, checkErr)
+		}
 		if rmErr := cli.ContainerRemove(startCtx, containerID, container.RemoveOptions{Force: true}); rmErr != nil {
-			log.Printf("[SANDBOX-START] 起動直後に終了したコンテナの削除にも失敗しました(手動確認が必要な可能性があります) container=%s err=%v", containerID, rmErr)
+			log.Printf("[SANDBOX-START] 初期化に失敗したコンテナの削除にも失敗しました(手動確認が必要な可能性があります) container=%s err=%v", containerID, rmErr)
 		}
-		return "", &StartContainerError{
-			Retryable: true,
-			Message:   "環境の起動に失敗しました(メモリ不足の可能性があります)。しばらくしてからもう一度お試しください。",
-			Cause:     errors.New("container exited immediately after start"),
+
+		if checkErr == nil && !running {
+			log.Printf("[SANDBOX-START] コンテナが初期化中に終了しました(メモリ不足によるOOM Killの可能性があります) container=%s", containerID)
+			return "", &StartContainerError{
+				Retryable: true,
+				Message:   "環境の起動に失敗しました(メモリ不足の可能性があります)。しばらくしてからもう一度お試しください。",
+				Cause:     fmt.Errorf("container exited during init: %w", err),
+			}
 		}
+		return "", &StartContainerError{Retryable: true, Message: "環境の初期化に時間がかかっています。もう一度お試しください。", Cause: err}
 	}
+	log.Printf("[SANDBOX-START] 初期化完了(Ready確認) container=%s elapsed=%s", containerID, time.Since(readyStartedAt))
 
 	dbWriteStartedAt := time.Now()
 	if err := db.CreateProgramSandbox(tx, userID, courseID, containerID, dockerName, displayName, "running", poolSlot); err != nil {
@@ -467,44 +498,43 @@ func containerIsRunning(ctx context.Context, cli docker.ContainerAPI, containerI
 	return list[0].State == "running", nil
 }
 
-// initWorkspaceGitRepo runs `git init` inside the freshly created sandbox's
-// workspace so students can start committing right away (NextPlan.md
-// フェーズ5「ベースイメージへのgit標準搭載、コンテナ生成時のgit init自動化」。
-// identity(user.name/user.email)とinit.defaultBranchはsandbox-baseの
-// Dockerfileで既定値をグローバル設定済み)。
-// git initは既存の.gitがあっても履歴を消さず安全に再初期化するだけなので
-// 事前チェックは不要。失敗してもサンドボックス作成自体は失敗させない
-// (gitが無くてもシェル/エディター機能自体は使えるため、生徒は後から自分で
-// `git init`し直せる) - ログだけ残す。
-func initWorkspaceGitRepo(ctx context.Context, cli docker.ContainerAPI, containerID string) {
-	execCtx, cancel := context.WithTimeout(ctx, sandboxExecTimeout())
-	defer cancel()
+// waitForSandboxReady polls for /tmp/sandbox-ready inside containerID -
+// sandbox-baseのentrypoint.sh(sandbox-images/sandbox-base/entrypoint.sh)が
+// DNS上書き・ワークスペース初期化・git initまでの全初期化ステップを終えた
+// 最後に作るしるしで、これを確認できて初めてこのサンドボックスを「使える」
+// ものとして扱う。以前はGoバックエンド側が別途docker exec経由で`git init`
+// だけを実行していた(initWorkspaceGitRepo)が、ENTRYPOINTの初期化と別々の
+// タイミングで走ることで、生徒のファイル一覧/シェル接続がENTRYPOINTの
+// 初期化完了前に飛んでしまう競合や、追加のexec呼び出し自体のオーバーヘッド
+// があったため、初期化はENTRYPOINT側に一本化し、こちらはその完了を待つだけ
+// の役目に変えた。
+//
+// 呼び出し元(StartProgramContainer/resumeProgramContainer)は、これが
+// エラーを返した場合にcontainerIsRunningで生死を確認し、「コンテナごと
+// 死んでいる(OOM Killの可能性)」のか「生きてはいるが初期化が終わらない
+// (ハング)」のかを切り分けている。
+func waitForSandboxReady(ctx context.Context, cli docker.ContainerAPI, containerID string) error {
+	deadline := time.Now().Add(sandboxReadyTimeout())
+	for {
+		execCtx, cancel := context.WithTimeout(ctx, sandboxExecTimeout())
+		_, _, exitCode, err := runContainerCommand(execCtx, cli, containerID, []string{"test", "-f", "/tmp/sandbox-ready"})
+		cancel()
+		if err == nil && exitCode == 0 {
+			return nil
+		}
 
-	_, stderr, exitCode, err := runContainerCommand(execCtx, cli, containerID, []string{"git", "init", sandboxWorkspacePath})
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			// これはexit=137(SIGKILL)とは別の失敗モード - Go側がexecの応答
-			// 待ちを諦めただけで、コンテナ内のgitプロセス自体に信号は届いて
-			// いない(defaultSandboxExecTimeoutSecのコメント参照)。プロセスは
-			// バックグラウンドで動き続けている可能性がある。
-			log.Printf("[SANDBOX-START] git initがタイムアウトしました(%s、SANDBOX_EXEC_TIMEOUT_SECで調整可能) container=%s", sandboxExecTimeout(), containerID)
-			return
+		if time.Now().After(deadline) {
+			if err != nil {
+				return fmt.Errorf("サンドボックスの初期化待機に失敗しました: %w", err)
+			}
+			return fmt.Errorf("サンドボックスの初期化がタイムアウトしました(%s)", sandboxReadyTimeout())
 		}
-		log.Printf("[SANDBOX-START] git initの実行に失敗しました container=%s err=%v", containerID, err)
-		return
-	}
-	if exitCode != 0 {
-		hint := ""
-		if exitCode == 137 {
-			// 137 = 128+9 (SIGKILL)。git init自体が重い処理ではないため、
-			// これが起きる時はほぼ確実にcgroupのメモリ上限超過によるOOM Kill
-			// (ホスト側のkernelもしくはgVisorのSentryによるもの)であり、
-			// git initプロセス単体どころかコンテナ全体が道連れで終了して
-			// いることが多い(StartProgramContainerのcontainerIsRunningに
-			// よる直後の生死確認を参照)。
-			hint = "(exit=137はSIGKILL - メモリ不足によるOOM Killの可能性が高く、コンテナ全体が終了している場合もあります。SANDBOX_MEMORY_LIMIT_MBやホストの空きメモリを確認してください)"
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(sandboxReadyPollInterval):
 		}
-		log.Printf("[SANDBOX-START] git initが失敗しました(exit=%d)%s container=%s stderr=%s", exitCode, hint, containerID, strings.TrimSpace(stderr))
 	}
 }
 
@@ -528,7 +558,13 @@ func ResumeProgramContainer(ctx context.Context, cli docker.ContainerAPI, tx *go
 func resumeProgramContainer(ctx context.Context, cli docker.ContainerAPI, tx *gorm.DB, userID uuid.UUID, courseID uint) (containerID string, alreadyRunning bool, err error) {
 	defer lockSandboxOp(userID, courseID)()
 
-	existing, err := findSandbox(ctx, cli, userID, courseID)
+	// StartProgramContainerと同じ理由の全体タイムアウト(sandboxStartTimeout
+	// のコメント参照) - resumeでもENTRYPOINTは毎回実行される(entrypoint.sh
+	// のコメント参照)ため、同じ初期化待ちが発生する。
+	startCtx, cancel := context.WithTimeout(ctx, sandboxStartTimeout())
+	defer cancel()
+
+	existing, err := findSandbox(startCtx, cli, userID, courseID)
 	if err != nil {
 		return "", false, err
 	}
@@ -543,9 +579,23 @@ func resumeProgramContainer(ctx context.Context, cli docker.ContainerAPI, tx *go
 		return existing.ID, true, nil
 	}
 
-	if err := cli.ContainerStart(ctx, existing.ID, container.StartOptions{}); err != nil {
+	if err := cli.ContainerStart(startCtx, existing.ID, container.StartOptions{}); err != nil {
 		return "", false, err
 	}
+
+	// entrypoint.shの初期化完了(/tmp/sandbox-ready)を待つ - StartProgramContainer
+	// と同じ理由(waitForSandboxReadyのコメント参照)。失敗した場合もDBは
+	// "running"へ更新しない(実体が使える状態になったと確認できていない)。
+	if err := waitForSandboxReady(startCtx, cli, existing.ID); err != nil {
+		log.Printf("[SANDBOX-RESUME] 初期化完了待ちに失敗しました container=%s err=%v", existing.ID, err)
+		running, checkErr := containerIsRunning(startCtx, cli, existing.ID)
+		if checkErr == nil && !running {
+			log.Printf("[SANDBOX-RESUME] コンテナが再開直後に終了しました(メモリ不足によるOOM Killの可能性があります) container=%s", existing.ID)
+			return "", false, fmt.Errorf("環境の再開に失敗しました(メモリ不足の可能性があります)。しばらくしてからもう一度お試しください: %w", err)
+		}
+		return "", false, fmt.Errorf("環境の初期化に時間がかかっています。もう一度お試しください: %w", err)
+	}
+
 	if err := db.UpdateProgramSandboxStatus(tx, userID, courseID, existing.ID, "running"); err != nil {
 		return "", false, err
 	}
