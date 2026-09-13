@@ -114,6 +114,16 @@ func runContainerCommand(ctx context.Context, cli docker.ContainerAPI, container
 	if _, err := stdcopy.StdCopy(&stdoutBuf, &stderrBuf, hijacked.Reader); err != nil {
 		return "", "", 0, err
 	}
+	// ctxがキャンセル/タイムアウトした結果として接続が強制的に閉じられた
+	// 場合、stdcopy.StdCopyはそれを普通のEOFとして観測し、エラーを返さずに
+	// 正常終了してしまうことがある(実際にnet.Pipeを使った統合テストで
+	// 確認済み、program_service_test.goのTestInitWorkspaceGitRepo_
+	// TimesOutInsteadOfHangingForever参照)。その状態のままContainerExecInspect
+	// へ進むと、意味を持たない結果を本物の終了コードであるかのように扱って
+	// しまいかねないため、ここで明示的にctxを確認してから先へ進む。
+	if err := ctx.Err(); err != nil {
+		return "", "", 0, err
+	}
 
 	inspect, err := cli.ContainerExecInspect(ctx, execResp.ID)
 	if err != nil {
@@ -160,6 +170,16 @@ func runContainerCommandWithStdin(ctx context.Context, cli docker.ContainerAPI, 
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 	if _, err := stdcopy.StdCopy(&stdoutBuf, &stderrBuf, hijacked.Reader); err != nil {
+		return "", "", 0, err
+	}
+	// ctxがキャンセル/タイムアウトした結果として接続が強制的に閉じられた
+	// 場合、stdcopy.StdCopyはそれを普通のEOFとして観測し、エラーを返さずに
+	// 正常終了してしまうことがある(実際にnet.Pipeを使った統合テストで
+	// 確認済み、program_service_test.goのTestInitWorkspaceGitRepo_
+	// TimesOutInsteadOfHangingForever参照)。その状態のままContainerExecInspect
+	// へ進むと、意味を持たない結果を本物の終了コードであるかのように扱って
+	// しまいかねないため、ここで明示的にctxを確認してから先へ進む。
+	if err := ctx.Err(); err != nil {
 		return "", "", 0, err
 	}
 

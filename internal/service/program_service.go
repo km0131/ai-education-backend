@@ -53,6 +53,25 @@ const (
 
 	execWipeTimeout      = 10 * time.Second
 	execWipePollInterval = 100 * time.Millisecond
+
+	// initWorkspaceGitRepoが`git init`を実行する際の上限時間の既定値。
+	// ラズパイ等のI/Oが遅い環境でも安全側に倒せるよう.envで調整可能にして
+	// おく(sandboxExecTimeout参照)。これは「Go側が能動的にプロセスへ
+	// SIGKILLを送る」ためのものではなく(そのような仕組みはこのコードには
+	// 存在しない - contextがキャンセルされた場合、ExecAttach/ExecInspect自体が
+	// エラーを返して終わるだけで、コンテナ内のgitプロセスへ信号は飛ばない)、
+	// 純粋に「git initが万一ハングした場合にリクエストを永遠に塞がせない」
+	// ための保険。exit=137(SIGKILL)自体の原因(cgroupのメモリ上限超過による
+	// OOM Kill、containerIsRunningのコメント参照)とは別の話。
+	// defaultSandboxStartTimeoutSec(全体の上限)より短く取り、1コマンドの
+	// ハングが全体予算を丸ごと食いつぶさないようにしている。
+	defaultSandboxExecTimeoutSec = 15
+
+	// StartProgramContainer全体(ContainerCreate/Start・git init・起動直後の
+	// 生死確認)の既定の上限時間。defaultSandboxExecTimeoutSecと同様、
+	// 実際にプロセスへ信号を送る仕組みではなく、リクエストを無期限に
+	// 待たせないための保険(sandboxStartTimeoutのコメント参照)。
+	defaultSandboxStartTimeoutSec = 30
 )
 
 // ErrSandboxNotFound is returned by Resume/Stop/Delete when no sandbox
@@ -197,6 +216,39 @@ func resourceLimits() (nanoCPUs int64, memoryBytes int64, pidsLimit int64) {
 	return nanoCPUs, memoryBytes, pidsLimit
 }
 
+// sandboxExecTimeout reads SANDBOX_EXEC_TIMEOUT_SEC from the environment,
+// falling back to defaultSandboxExecTimeoutSec when unset or invalid. Bounds
+// how long initWorkspaceGitRepo waits for `git init` to finish - a safety
+// net against a genuinely hung exec (slow disk I/O on constrained hardware),
+// not a mechanism for terminating the process itself (defaultSandboxExecTimeoutSec
+// のコメント参照 - contextのキャンセルはこちら側の待ちを諦めるだけで、
+// コンテナ内のプロセスへ信号を送るわけではない)。
+func sandboxExecTimeout() time.Duration {
+	seconds := defaultSandboxExecTimeoutSec
+	if v := os.Getenv("SANDBOX_EXEC_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			seconds = n
+		}
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// sandboxStartTimeout reads SANDBOX_START_TIMEOUT_SEC from the environment,
+// falling back to defaultSandboxStartTimeoutSec when unset or invalid. Bounds
+// StartProgramContainer's ENTIRE create+init sequence (previously unbounded -
+// nothing timed it out short of the caller's own context, if any, being
+// cancelled)。個別コマンドの上限(sandboxExecTimeout)とは別に、作成処理
+// 全体としての上限を設けたいという要望に対応するもの。
+func sandboxStartTimeout() time.Duration {
+	seconds := defaultSandboxStartTimeoutSec
+	if v := os.Getenv("SANDBOX_START_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			seconds = n
+		}
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 // idleTimeout reads SANDBOX_IDLE_TIMEOUT_MINUTES from the environment,
 // falling back to defaultSandboxIdleTimeoutMinutes when unset or invalid.
 // A running, non-published sandbox whose LastActiveAt is older than this
@@ -272,7 +324,21 @@ func allocatePoolSlot(tx *gorm.DB) (string, error) {
 func StartProgramContainer(ctx context.Context, cli docker.ContainerAPI, tx *gorm.DB, userID uuid.UUID, courseID uint, displayName string) (containerID string, err error) {
 	defer lockSandboxOp(userID, courseID)()
 
-	existing, err := findSandbox(ctx, cli, userID, courseID)
+	// startCtx: 作成処理全体(ContainerCreate/Start・git init・起動直後の
+	// 生死確認)を一つの上限時間で束ねる、SANDBOX_START_TIMEOUT_SECで調整
+	// 可能な全体タイムアウト - 以前はここに何の上限も無く(親ctxがキャンセル
+	// されない限り無期限に待ち続ける構成だった)、要望を受けて新たに追加した
+	// もの。Postgresへの書き込み(tx経由、db.CreateProgramSandbox)はこの
+	// アプリ全体で元々contextベースのタイムアウト管理をしておらず(このtxは
+	// 呼び出し元ハンドラーがトランザクションとして開いたものをそのまま
+	// 受け取るだけ)、ここでも対象にしない。
+	startCtx, cancel := context.WithTimeout(ctx, sandboxStartTimeout())
+	defer cancel()
+
+	startedAt := time.Now()
+	log.Printf("[SANDBOX-START] 開始 user=%s course=%d", userID, courseID)
+
+	existing, err := findSandbox(startCtx, cli, userID, courseID)
 	if err != nil {
 		return "", err
 	}
@@ -299,8 +365,9 @@ func StartProgramContainer(ctx context.Context, cli docker.ContainerAPI, tx *gor
 	// エラーは、リトライしても無駄な種類も含め既に*StartContainerErrorへ
 	// 分類済み(NextPlan.md フェーズ2「コンテナ起動失敗時のリトライ・
 	// ユーザー通知フローを設計」、internal/service/container_start_retry.go)。
+	createStartedAt := time.Now()
 	containerID, err = createAndStartContainer(
-		ctx,
+		startCtx,
 		cli,
 		&container.Config{
 			Image:  sandboxImage,
@@ -335,7 +402,11 @@ func StartProgramContainer(ctx context.Context, cli docker.ContainerAPI, tx *gor
 	if err != nil {
 		return "", err
 	}
-	initWorkspaceGitRepo(ctx, cli, containerID)
+	log.Printf("[SANDBOX-START] ContainerCreate+ContainerStart 完了 container=%s elapsed=%s", containerID, time.Since(createStartedAt))
+
+	gitInitStartedAt := time.Now()
+	initWorkspaceGitRepo(startCtx, cli, containerID)
+	log.Printf("[SANDBOX-START] git init 完了 container=%s elapsed=%s", containerID, time.Since(gitInitStartedAt))
 
 	// gVisor(runsc)はコンテナのメモリ管理をSentryプロセス自身が担うため、
 	// cgroupのメモリ上限(resourceLimits)に達すると、個別プロセスだけでなく
@@ -347,11 +418,11 @@ func StartProgramContainer(ctx context.Context, cli docker.ContainerAPI, tx *gor
 	// 食い違いが生じ、直後のファイル一覧/シェル接続が説明の付かない409
 	// (ErrSandboxNotRunning)で失敗し続けることになる - ここで一度だけ生死を
 	// 確認し、既に終了していれば起動失敗として素直に報告する。
-	if running, checkErr := containerIsRunning(ctx, cli, containerID); checkErr != nil {
+	if running, checkErr := containerIsRunning(startCtx, cli, containerID); checkErr != nil {
 		log.Printf("[SANDBOX-START] 起動直後の状態確認に失敗しました container=%s err=%v", containerID, checkErr)
 	} else if !running {
 		log.Printf("[SANDBOX-START] コンテナが起動直後に終了しました(メモリ不足によるOOM Killの可能性があります) container=%s", containerID)
-		if rmErr := cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true}); rmErr != nil {
+		if rmErr := cli.ContainerRemove(startCtx, containerID, container.RemoveOptions{Force: true}); rmErr != nil {
 			log.Printf("[SANDBOX-START] 起動直後に終了したコンテナの削除にも失敗しました(手動確認が必要な可能性があります) container=%s err=%v", containerID, rmErr)
 		}
 		return "", &StartContainerError{
@@ -361,16 +432,19 @@ func StartProgramContainer(ctx context.Context, cli docker.ContainerAPI, tx *gor
 		}
 	}
 
+	dbWriteStartedAt := time.Now()
 	if err := db.CreateProgramSandbox(tx, userID, courseID, containerID, dockerName, displayName, "running", poolSlot); err != nil {
 		// Dockerコンテナは既に起動済みなのに記録だけ失敗した状態を放置しない。
 		// 放置すると: 次回findSandbox()がこの孤立コンテナをDocker側から見つけて
 		// 「既に存在します」を返す一方、program_sandboxes行が無いためプール
 		// スロットはDB上ずっと空き扱いのまま(=二重割り当てのリスク)になる。
-		if rmErr := cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true}); rmErr != nil {
+		if rmErr := cli.ContainerRemove(startCtx, containerID, container.RemoveOptions{Force: true}); rmErr != nil {
 			log.Printf("[SANDBOX-START] DB記録失敗後のコンテナ削除にも失敗しました(手動確認が必要な可能性があります) container=%s err=%v", containerID, rmErr)
 		}
 		return "", &StartContainerError{Retryable: true, Message: "コンテナの記録に失敗しました。もう一度お試しください。", Cause: err}
 	}
+	log.Printf("[SANDBOX-START] DBレコード作成(Postgres) 完了 container=%s elapsed=%s", containerID, time.Since(dbWriteStartedAt))
+	log.Printf("[SANDBOX-START] 全体完了 container=%s user=%s course=%d total_elapsed=%s", containerID, userID, courseID, time.Since(startedAt))
 	return containerID, nil
 }
 
@@ -403,8 +477,19 @@ func containerIsRunning(ctx context.Context, cli docker.ContainerAPI, containerI
 // (gitが無くてもシェル/エディター機能自体は使えるため、生徒は後から自分で
 // `git init`し直せる) - ログだけ残す。
 func initWorkspaceGitRepo(ctx context.Context, cli docker.ContainerAPI, containerID string) {
-	_, stderr, exitCode, err := runContainerCommand(ctx, cli, containerID, []string{"git", "init", sandboxWorkspacePath})
+	execCtx, cancel := context.WithTimeout(ctx, sandboxExecTimeout())
+	defer cancel()
+
+	_, stderr, exitCode, err := runContainerCommand(execCtx, cli, containerID, []string{"git", "init", sandboxWorkspacePath})
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			// これはexit=137(SIGKILL)とは別の失敗モード - Go側がexecの応答
+			// 待ちを諦めただけで、コンテナ内のgitプロセス自体に信号は届いて
+			// いない(defaultSandboxExecTimeoutSecのコメント参照)。プロセスは
+			// バックグラウンドで動き続けている可能性がある。
+			log.Printf("[SANDBOX-START] git initがタイムアウトしました(%s、SANDBOX_EXEC_TIMEOUT_SECで調整可能) container=%s", sandboxExecTimeout(), containerID)
+			return
+		}
 		log.Printf("[SANDBOX-START] git initの実行に失敗しました container=%s err=%v", containerID, err)
 		return
 	}
