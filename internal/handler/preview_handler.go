@@ -4,7 +4,9 @@ import (
 	"errors"
 	"mime"
 	"net/http"
+	"net/url"
 	"path"
+	"regexp"
 	"strconv"
 
 	"ai-education/backend/internal/service"
@@ -145,4 +147,58 @@ func (h *Handler) PreviewFile(c *gin.Context) {
 		contentType = "application/octet-stream"
 	}
 	c.Data(http.StatusOK, contentType, data)
+}
+
+// previewPathPattern extracts {ticket}/{port} from a Referer path shaped
+// like PreviewProxyのルート(v2.Any("/program/container/preview/:ticket/:port/*path", ...))。
+var previewPathPattern = regexp.MustCompile(`^/api/v2/program/container/preview/([^/]+)/([0-9]+)(?:/|$)`)
+
+// PreviewNoRoute is registered as the API ルーター全体のフォールバック
+// (r.NoRoute、cmd/main.go)。エディタ内プレビュー(iframe)で表示している
+// Flaskアプリ等が、`url_for()`ではなく`href="/add"`のように絶対パスを
+// 直書きしたリンク/フォームを持っている場合、ブラウザはプレフィックス
+// (/api/v2/program/container/preview/{ticket}/{port})を無視してこの
+// APIサーバー自身のルート(例: https://ai-back.a-kiis.com/add)へ直接
+// 遷移してしまう。これは/api/v2配下のどのルートにもマッチしないため、
+// 何もしなければGinの素の404("404 page not found")になる。
+//
+// <base href>(injectBaseHref)はブラウザの相対URL解決にしか効かず、
+// ProxyFix(x_prefix=1)はFlask自身が生成するurl_for()のURLにしか効かない
+// ため、テンプレートに直書きされた絶対パスはどちらの仕組みでも補正できない
+// (WebPreviewPane.tsxの既知の制約コメント参照)。ここでは、直前に見ていた
+// はずのプレビューURL(Refererヘッダー)からticket/portを復元できた場合
+// だけ、本来行きたかったプレフィックス付きURLへリダイレクトすることで
+// この1ケースだけ救済する。復元できない(Refererが無い/プレビュー由来で
+// ない等、無関係な404)場合はGin既定と同じ本文を返し、他のAPIの404挙動は
+// 変えない。
+func (h *Handler) PreviewNoRoute(c *gin.Context) {
+	if target, ok := resolvePreviewRedirectFromReferer(c); ok {
+		c.Redirect(http.StatusFound, target)
+		return
+	}
+	c.String(http.StatusNotFound, "404 page not found")
+}
+
+func resolvePreviewRedirectFromReferer(c *gin.Context) (string, bool) {
+	referer := c.Request.Referer()
+	if referer == "" {
+		return "", false
+	}
+	refURL, err := url.Parse(referer)
+	if err != nil {
+		return "", false
+	}
+	m := previewPathPattern.FindStringSubmatch(refURL.Path)
+	if m == nil {
+		return "", false
+	}
+	ticket, portStr := m[1], m[2]
+	if _, _, ok := service.ValidatePreviewTicket(ticket); !ok {
+		return "", false
+	}
+	target := "/api/v2/program/container/preview/" + ticket + "/" + portStr + c.Request.URL.Path
+	if rq := c.Request.URL.RawQuery; rq != "" {
+		target += "?" + rq
+	}
+	return target, true
 }

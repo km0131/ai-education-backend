@@ -152,14 +152,16 @@ func StartPreviewTunnel(ctx context.Context, cli docker.ContainerAPI, containerI
 // パス(例: `/static/style.css`)は、このAPI自身のプレフィックス配下に
 // 居ることを知らないため、そのままではプレフィックスの外(このAPIの
 // ルート)を指してしまうことがある。HTMLレスポンスには<base href>を注入し
-// 同一ディレクトリ内の相対参照だけは補正しているが(injectBaseHref)、
-// 絶対パスの完全な解決にはNextPlan.mdフェーズ7のようなサブドメイン単位の
-// ルーティングが必要になる - シンプルな(相対パス中心の)ページのプレビュー
-// 用と割り切る。
+// 同一ディレクトリ内の相対参照だけは補正している(injectBaseHref)ほか、
+// コンテナへ転送するリクエストにX-Forwarded-Prefix/-Host/-Protoを付与し
+// (newTunnelDirector参照)、アプリ側がwerkzeug.middleware.proxy_fixの
+// ProxyFix(x_prefix=1)を導入していれば`url_for()`自体にプレフィックスを
+// 付け直させることもできる - ただしアプリ側の対応が前提のため、対応して
+// いない素朴なアプリに対する保険としては引き続きinjectBaseHrefが効く。
 func NewPreviewReverseProxy(cli docker.ContainerAPI, containerID, targetPath string, port int, basePath string) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Transport: newTunnelTransport(cli, containerID, port),
-		Director:  newTunnelDirector(targetPath, port),
+		Director:  newTunnelDirector(targetPath, port, strings.TrimSuffix(basePath, "/")),
 		ModifyResponse: func(resp *http.Response) error {
 			_, err := injectBaseHref(resp, basePath)
 			return err
@@ -177,7 +179,7 @@ func NewPreviewReverseProxy(cli docker.ContainerAPI, containerID, targetPath str
 func NewPublicPreviewReverseProxy(cli docker.ContainerAPI, containerID, targetPath string, port int, basePath, slug string) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Transport: newTunnelTransport(cli, containerID, port),
-		Director:  newTunnelDirector(targetPath, port),
+		Director:  newTunnelDirector(targetPath, port, strings.TrimSuffix(basePath, "/")),
 		ModifyResponse: func(resp *http.Response) error {
 			body, err := injectBaseHref(resp, basePath)
 			if err != nil {
@@ -205,8 +207,20 @@ func newTunnelTransport(cli docker.ContainerAPI, containerID string, port int) *
 	}
 }
 
-func newTunnelDirector(targetPath string, port int) func(*http.Request) {
+// forwardedPrefix is the path prefix this proxy stripped before arriving at
+// targetPath(例: "/9mvcvrmrjscx"、末尾スラッシュ無し・basePathから
+// 呼び出し元が事前に切り落とす) - コンテナ内アプリ(Flask等)へ
+// X-Forwarded-Prefixとして伝え、werkzeug.middleware.proxy_fixのProxyFix
+// (x_prefix=1)を導入していれば`url_for()`等が生成するURL/リダイレクト先に
+// このプレフィックスを自動で付け直させられる(付けなければ、アプリが生成
+// する絶対パスがプレフィックスの外=このAPI自身のルートを指してしまい、
+// 404になる)。
+func newTunnelDirector(targetPath string, port int, forwardedPrefix string) func(*http.Request) {
 	return func(req *http.Request) {
+		// req.Hostはこの時点ではまだ元のリクエスト(例: preview.a-kiis.com)の
+		// ものなので、上書きする前にX-Forwarded-Hostとして退避しておく。
+		originalHost := req.Host
+
 		req.URL.Scheme = "http"
 		// DialContextは第2引数(addr)を無視して常にcontainerID+portへ
 		// トンネルするため、ここは実際のダイヤル先ではなくHostヘッダー/
@@ -214,6 +228,14 @@ func newTunnelDirector(targetPath string, port int) func(*http.Request) {
 		req.URL.Host = fmt.Sprintf("127.0.0.1:%d", port)
 		req.URL.Path = targetPath
 		req.Host = req.URL.Host
+
+		req.Header.Set("X-Forwarded-Prefix", forwardedPrefix)
+		req.Header.Set("X-Forwarded-Host", originalHost)
+		// このプロキシ自体は常にpreview.a-kiis.com/backendのAPIドメイン
+		// (どちらも本番はHTTPS)経由でのみ到達する想定のため固定値にする -
+		// backend自身は素のHTTPで待受けており(TLS終端は手前で行う構成)、
+		// req.TLSからは判定できない。
+		req.Header.Set("X-Forwarded-Proto", "https")
 	}
 }
 

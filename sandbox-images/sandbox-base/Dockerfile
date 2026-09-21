@@ -52,6 +52,15 @@ RUN git config --global user.name "Student" \
 # 方式にする(生徒がファイルを削除/編集した後の再開時に上書きしないため)。
 COPY workspace-init/README.md /opt/workspace-init/README.md
 
+# 生徒向けのFlaskスターター(app.py)。ProxyFix(x_prefix=1)を最初から
+# 組み込んでおくことで、生徒がこのファイルをベースに書き進めれば、単一
+# サブドメイン公開機能(preview.a-kiis.com/{slug}/...)のパスプレフィックス
+# 配下でもurl_for()が正しいURLを生成できる(newTunnelDirectorが付与する
+# X-Forwarded-Prefix等、internal/service/preview_service.go参照)。README.md
+# と同じ理由・同じ方式(bind mountに覆い隠されない場所に置き、起動時に
+# entrypoint.shが「まだ無ければ」コピーする)。
+COPY workspace-init/app.py /opt/workspace-init/app.py
+
 # 汎用LSP中継(internal/service/lsp_service.go)が拡張子→起動コマンドを
 # 引く対応表のデフォルト値。Pythonは何も設定しなくても自動でpyrightが
 # 起動するよう、コンテナ生成時にあらかじめ書き込んでおく(NextPlan.md
