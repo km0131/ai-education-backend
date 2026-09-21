@@ -220,12 +220,22 @@ func main() {
 				prGroup.POST("/container/preview-ticket", h.IssuePreviewTicket)
 				prGroup.POST("/container/commit", h.CommitWorkspace)
 				prGroup.GET("/container/files", h.ListSandboxFiles)
+				// ダウンロードシステム: ワークスペース全体をZIP化してダウンロード。
+				prGroup.GET("/container/download", h.DownloadSandboxWorkspaceZip)
 				prGroup.GET("/container/file", h.GetSandboxFileContent)
 				prGroup.POST("/container/file", h.CreateSandboxPath)
 				prGroup.PUT("/container/file", h.MoveSandboxPath)
 				prGroup.PATCH("/container/file", h.WriteSandboxFileContent)
 				prGroup.DELETE("/container/file", h.DeleteSandboxPath)
+				// 未保存ファイル一括保存(Save All)・汎用ファイルアップロード
+				// (汎用ファイルアップロード&未保存ファイル一括保存(Save All)
+				// 機能の実装 作業指示書)。
+				prGroup.POST("/container/files/save-all", h.SaveAllSandboxFiles)
+				prGroup.POST("/container/files/upload", h.UploadSandboxFile)
 				prGroup.DELETE("/container", h.DeleteProgramContainer)
+				// マルチDB対応SQL実行&閲覧UI(現状SQLiteのみ、sql_handler.go
+				// のコメント参照)。
+				prGroup.POST("/container/sql/execute", h.ExecuteSandboxSQL)
 				// 単一サブドメイン(preview.a-kiis.com)パスベース公開機能
 				// (NextPlan.md フェーズ7)の生徒本人向け管理API。
 				prGroup.POST("/container/publish", h.PublishSandboxContainer)
@@ -277,6 +287,15 @@ func main() {
 	}
 
 	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+
+	// エディタ内蔵プレビュー(iframe)内のFlaskアプリ等が`url_for()`ではなく
+	// `href="/add"`のような絶対パスを直書きしている場合、ブラウザは
+	// /api/v2/program/container/preview/{ticket}/{port}というプレフィックス
+	// を無視してこのAPIサーバー自身のルートへ直接遷移してしまい、
+	// /api/v2配下のどのルートにもマッチしなくなる(PreviewNoRouteのコメント
+	// 参照)。Refererから復元できる場合だけ正しいプレフィックス付きURLへ
+	// リダイレクトし、それ以外の無関係な404はGin既定のまま変えない。
+	r.NoRoute(h.PreviewNoRoute)
 
 	// 単一サブドメイン(preview.a-kiis.com)パスベース公開機能(NextPlan.md
 	// フェーズ7)。本番APIのGinエンジン(r、Hostは通常ai-back.a-kiis.com等)

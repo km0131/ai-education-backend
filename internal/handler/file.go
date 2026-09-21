@@ -2,8 +2,10 @@ package handler
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"path"
+	"strconv"
 
 	"ai-education/backend/internal/db"
 	"ai-education/backend/internal/service"
@@ -490,4 +492,147 @@ func (h *Handler) DeleteSandboxPath(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "削除しました"})
+}
+
+// saveAllSandboxFilesRequest is the body for POST /container/files/save-all
+// (「すべて保存」作業指示書 - エディタで開いている未保存タブをまとめて
+// 送る)。
+type saveAllSandboxFilesRequest struct {
+	CourseID uint                       `json:"course_id" binding:"required"`
+	Files    []service.SandboxFileWrite `json:"files" binding:"required"`
+}
+
+// SaveAllSandboxFiles writes several files in one request(「すべて保存」
+// Ctrl+Shift+S / ツールバーボタン)。個々のファイルの保存はWriteSandboxFileContent
+// (PATCH /container/file)と全く同じ検証・書き込みロジックで、1ファイルの
+// 失敗で他を巻き込まないよう、成功/失敗をファイルごとに返す(フロントは
+// 結果を見て、成功したパスのタブだけisDirtyを解除する)。
+func (h *Handler) SaveAllSandboxFiles(c *gin.Context) {
+	var req saveAllSandboxFilesRequest
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.Files) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "リクエストが不正です"})
+		return
+	}
+
+	userID, ok := h.authorizeSandboxCourse(c, req.CourseID)
+	if !ok {
+		return
+	}
+	containerID, ok := h.sandboxContainerIDOrRespond(c, userID, req.CourseID)
+	if !ok {
+		return
+	}
+
+	results, err := service.SaveSandboxFilesBatch(c.Request.Context(), h.DockerClient, containerID, req.Files)
+	switch {
+	case errors.Is(err, service.ErrTooManySandboxFiles):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	case errors.Is(err, service.ErrSandboxPathForbidden):
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	case err != nil:
+		h.respondError(c, http.StatusInternalServerError, "一括保存", "ファイルの一括保存に失敗しました", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"results": results})
+}
+
+// maxUploadRequestBytes bounds the whole multipart request body we're
+// willing to read before even looking at the file part - a quick early
+// rejection based on the Content-Lengthヘッダー(送られてくる場合)。実際の
+// 上限(sandboxUploadFileSizeLimit、file_service.go)はファイル本体の
+// バイト数そのものに対してUploadSandboxFile側でも確認する(Content-Length
+// が無い/chunked転送のリクエストではここでは弾けないため、そちらが最終的な
+// 保証)。multipartのフィールド名・境界文字列などのオーバーヘッド分だけ
+// 少し余裕を持たせている。
+const maxUploadRequestBytes = 100*1024*1024 + 2*1024*1024
+
+// UploadSandboxFile handles POST /container/files/upload(ファイルツリーへの
+// ドラッグ&ドロップ、またはツールバーのアップロードボタン)。destinationは
+// 保存先ディレクトリの相対パス(ファイル名はアップロードされたファイル自身の
+// 名前をそのまま使う - ディレクトリが無ければ自動作成、既存ファイルは
+// 上書きする、UploadSandboxFile(service)のコメント参照)。
+func (h *Handler) UploadSandboxFile(c *gin.Context) {
+	if c.Request.ContentLength > 0 && c.Request.ContentLength > maxUploadRequestBytes {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "ファイルサイズが大きすぎます(上限100MB)"})
+		return
+	}
+
+	courseID, err := strconv.ParseUint(c.PostForm("course_id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "course_idが不正です"})
+		return
+	}
+
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "アップロードするファイルを指定してください"})
+		return
+	}
+	if fileHeader.Size > int64(maxUploadRequestBytes) {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "ファイルサイズが大きすぎます(上限100MB)"})
+		return
+	}
+
+	// destinationはこのAPIの他エンドポイント(WriteSandboxFileContent等)と
+	// 同じ絶対パス表記(フロントのFileTreeItem.path/SANDBOX_WORKSPACE_PATH
+	// と揃える) - 空文字は「workspaceルート」を表す(ResolveSandboxPathの
+	// 既定動作)。ファイル名自体はブラウザ側のFile.name(path.Baseで先頭の
+	// ディレクトリ部分を除去し、ドラッグ元のフォルダ構成を無視して常に
+	// destination直下へ平らに置く)をそのまま使う。
+	destination := c.PostForm("destination")
+	destDir, err := service.ResolveSandboxPath(destination)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "保存先のパスが不正です"})
+		return
+	}
+	targetPath, err := service.ResolveSandboxPath(path.Join(destDir, path.Base(fileHeader.Filename)))
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "保存先のパスが不正です"})
+		return
+	}
+	if service.IsSandboxRoot(targetPath) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ファイル名が不正です"})
+		return
+	}
+
+	userID, ok := h.authorizeSandboxCourse(c, uint(courseID))
+	if !ok {
+		return
+	}
+	containerID, ok := h.sandboxContainerIDOrRespond(c, userID, uint(courseID))
+	if !ok {
+		return
+	}
+
+	src, err := fileHeader.Open()
+	if err != nil {
+		h.respondError(c, http.StatusInternalServerError, "ファイルアップロード", "ファイルの読み込みに失敗しました", err)
+		return
+	}
+	defer src.Close()
+	content, err := io.ReadAll(io.LimitReader(src, maxUploadRequestBytes+1))
+	if err != nil {
+		h.respondError(c, http.StatusInternalServerError, "ファイルアップロード", "ファイルの読み込みに失敗しました", err)
+		return
+	}
+
+	err = service.UploadSandboxFile(c.Request.Context(), h.DockerClient, containerID, targetPath, content)
+	switch {
+	case errors.Is(err, service.ErrSandboxFileTooLarge):
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "ファイルサイズが大きすぎます(上限100MB)"})
+		return
+	case errors.Is(err, service.ErrSandboxPathIsDirectory):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "指定されたパスはディレクトリです"})
+		return
+	case err != nil:
+		h.respondError(c, http.StatusInternalServerError, "ファイルアップロード", "ファイルのアップロードに失敗しました", err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"item": service.SandboxFileEntry{Name: path.Base(targetPath), Path: targetPath, IsDir: false, Size: int64(len(content))},
+	})
 }

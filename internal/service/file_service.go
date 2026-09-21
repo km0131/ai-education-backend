@@ -433,3 +433,130 @@ func WriteSandboxFileContent(ctx context.Context, cli docker.ContainerAPI, conta
 	}
 	return nil
 }
+
+// SandboxFileWrite is one entry of a Save All batch request(「すべて保存」
+// 作業指示書)- エディタで開いている複数タブのうち、未保存(isDirty)なもの
+// だけをまとめて送る。
+type SandboxFileWrite struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+// SandboxFileWriteResult reports one file's outcome within a Save All batch
+// - 1つのファイルの保存失敗(例: 保存の合間に生徒自身がそのファイルを
+// 削除していた)で他のファイルの保存まで巻き込んで失敗にしない(それぞれ
+// 独立したdocker execとして扱う)ため、成功/失敗をファイル単位で返す。
+type SandboxFileWriteResult struct {
+	Path  string `json:"path"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// sandboxSaveAllMaxFiles caps how many files a single Save All request will
+// process - 開いているタブ数の現実的な上限であり、これを超える数を許すと
+// 1リクエストで大量のdocker exec(ファイル1つにつき1回)を直列に発行する
+// ことになり、レスポンスが不必要に長くかかる。
+const sandboxSaveAllMaxFiles = 200
+
+// ErrTooManySandboxFiles: Save Allリクエストのfiles数がsandboxSaveAllMaxFiles
+// を超える場合。
+var ErrTooManySandboxFiles = errors.New("一度に保存できるファイル数の上限を超えています")
+
+// ErrSandboxPathForbidden: filesの中に1つでもワークスペース外を指すパス
+// (../等によるescape)が含まれていた場合(汎用ファイルアップロード&未保存
+// ファイル一括保存(Save All)機能の実装 作業指示書「セキュリティ」要件 -
+// ../等によるワークスペース外への書き込みは403 Forbiddenで拒否する)。
+// 個別ファイルのSandboxFileWriteResultとして200扱いに埋め込むのではなく、
+// リクエスト全体を拒否する(該当しない他の正当なファイルも含め、1件も
+// 書き込まない) - 呼び出し側(SaveAllSandboxFiles、file.go)がこれを
+// HTTPレベルの403として扱う。
+var ErrSandboxPathForbidden = errors.New("ワークスペース外へのアクセスは許可されていません")
+
+// SaveSandboxFilesBatch writes each of files in turn(WriteSandboxFileContentと
+// 全く同じ検証・書き込みロジックをファイルごとに繰り返すだけ - 複数ファイル
+// をまたぐ特別なアトミック性は無い、既存の単一ファイル保存と同じ挙動を
+// バッチにしただけのもの)。呼び出し側(SaveAllSandboxFiles、file.go)が
+// pathごとの結果を見て、フロントの対応するタブだけisDirtyを解除できるよう、
+// 1ファイルの保存失敗(例: 親フォルダが無い)で処理全体を中断せず、必ず
+// 全件分の結果を返す。ただし本当にワークスペース外を指すパス(ErrSandboxPathInvalid、
+// ../等によるescape)は性質が違う - これは「保存に失敗した」ではなく
+// 「そもそも許可されないリクエスト」なので、1件でも見つかった時点で
+// 何も書き込まずリクエスト全体をErrSandboxPathForbiddenとして拒否する
+// (事前の検証パスとして全件先にチェックしてから、実際の書き込みへ進む)。
+func SaveSandboxFilesBatch(ctx context.Context, cli docker.ContainerAPI, containerID string, files []SandboxFileWrite) ([]SandboxFileWriteResult, error) {
+	if len(files) > sandboxSaveAllMaxFiles {
+		return nil, ErrTooManySandboxFiles
+	}
+
+	targets := make([]string, len(files))
+	for i, f := range files {
+		targetPath, err := ResolveSandboxPath(f.Path)
+		if err != nil {
+			return nil, ErrSandboxPathForbidden
+		}
+		targets[i] = targetPath
+	}
+
+	results := make([]SandboxFileWriteResult, 0, len(files))
+	for i, f := range files {
+		targetPath := targets[i]
+		if IsSandboxRoot(targetPath) {
+			results = append(results, SandboxFileWriteResult{Path: targetPath, Error: "workspaceルート自体には書き込めません"})
+			continue
+		}
+
+		writeErr := WriteSandboxFileContent(ctx, cli, containerID, targetPath, f.Content)
+		if writeErr == nil {
+			results = append(results, SandboxFileWriteResult{Path: targetPath, OK: true})
+			continue
+		}
+		results = append(results, SandboxFileWriteResult{Path: targetPath, Error: writeErr.Error()})
+	}
+	return results, nil
+}
+
+// sandboxUploadFileSizeLimit caps a single uploaded file(作業指示書要件
+// 「最大100MB制限」)- sandboxFileSizeLimit(Monaco Editorでの通常保存、1MB)
+// とは別の、意図的にずっと大きい上限。アップロードは画像・データファイル等、
+// エディタで開いて編集する前提のテキストとは性質が違うため、別の定数として
+// 分けている。
+const sandboxUploadFileSizeLimit = 100 * 1024 * 1024 // 100MB
+
+// UploadSandboxFile writes content to targetPath(既にResolveSandboxPathで
+// 検証済み)- WriteSandboxFileContentと違い、(1) sandboxUploadFileSizeLimit
+// (100MB)という別の上限を使い、(2) 保存先の親ディレクトリが無ければ
+// 自動作成する(作業指示書要件 - ドラッグ&ドロップでファイルツリー上の
+// 任意の(まだ存在しない)フォルダへ直接落とせるようにするため)。
+// contentは(1MB程度のエディタ内テキストではなく)最大100MBの任意バイナリを
+// 想定するため、multipart.FileHeaderから読んだ生の[]byteをそのまま渡す
+// (文字列化・JSON化は経由しない - sql_handler.go/preview_handler.goの
+// ファイルAPIとは別に、file.goのUploadSandboxFileハンドラーがmultipart/
+// form-dataを直接扱う)。
+func UploadSandboxFile(ctx context.Context, cli docker.ContainerAPI, containerID, targetPath string, content []byte) error {
+	if len(content) > sandboxUploadFileSizeLimit {
+		return ErrSandboxFileTooLarge
+	}
+
+	mkdirCmd := []string{"sh", "-c", `exec mkdir -p -- "$(dirname -- "$1")"`, "sh", targetPath}
+	_, stderr, exitCode, err := runContainerCommand(ctx, cli, containerID, mkdirCmd)
+	if err != nil {
+		return err
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("mkdir -p failed (exit=%d): %s", exitCode, strings.TrimSpace(stderr))
+	}
+
+	_, stderr, exitCode, err = runContainerCommandWithStdin(ctx, cli, containerID, []string{
+		"dd", "of=" + targetPath, "status=none",
+	}, content)
+	if err != nil {
+		return err
+	}
+	if exitCode != 0 {
+		if strings.Contains(stderr, "Is a directory") {
+			return ErrSandboxPathIsDirectory
+		}
+		return fmt.Errorf("upload write failed (exit=%d): %s", exitCode, strings.TrimSpace(stderr))
+	}
+	return nil
+}

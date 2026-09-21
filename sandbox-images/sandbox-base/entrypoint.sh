@@ -34,6 +34,7 @@ echo "nameserver 8.8.4.4" >> /etc/resolv.conf 2>/dev/null || true
 #    ため)。
 mkdir -p /root/workspace
 [ -f /root/workspace/README.md ] || cp /opt/workspace-init/README.md /root/workspace/README.md 2>/dev/null || true
+[ -f /root/workspace/app.py ] || cp /opt/workspace-init/app.py /root/workspace/app.py 2>/dev/null || true
 
 # 3. LSP設定ディレクトリおよび初期ファイルの配置(同上)。
 mkdir -p /root/workspace/.ai
